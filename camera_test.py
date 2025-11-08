@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 import cv2
 import numpy as np
+import select
+import sys
 from numpy.typing import NDArray
-from camera import Camera
+from camera import Camera, Frame
 
 
 def overlay_centered(
         background: NDArray[np.uint8],
         foreground: NDArray[np.uint8]) -> NDArray[np.uint8]:
-    """Overlay foreground image centered on background."""
     result = background.copy()
     h, w = foreground.shape[:2]
     y_offset = (background.shape[0] - h) // 2
@@ -22,16 +23,15 @@ def test_harness() -> None:
     print("TEST HARNESS - Two Virtual Cameras")
     print("="*60)
     print("\nSimulates two computers facing each other.")
-    print("\nControls:")
-    print("  - Click window to select active side")
-    print("  - Press SPACE to lock corners on active side")
-    print("  - Press 'q' to quit")
+    print("\nFlow:")
+    print("  1. Press Enter to calibrate both sides")
+    print("  2. Press Enter to send test pattern")
+    print("  3. Press Enter to receive and decode")
     print("="*60 + "\n")
 
     cam_a = Camera(test_mode=True)
     cam_b = Camera(test_mode=True)
 
-    # Try to open webcam for background
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Warning: Could not open webcam, using black background\n")
@@ -40,38 +40,13 @@ def test_harness() -> None:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-    # Track which side is active
-    active_side = 'a'
-
-    def set_active_a(event, x, y, flags, param):
-        nonlocal active_side
-        if event == cv2.EVENT_LBUTTONDOWN or event == cv2.EVENT_MOUSEMOVE:
-            if active_side != 'a':
-                active_side = 'a'
-                print("Active: Side A")
-
-    def set_active_b(event, x, y, flags, param):
-        nonlocal active_side
-        if event == cv2.EVENT_LBUTTONDOWN or event == cv2.EVENT_MOUSEMOVE:
-            if active_side != 'b':
-                active_side = 'b'
-                print("Active: Side B")
-
-    # Create windows and set callbacks
-    cv2.namedWindow('Transmitter Side A')
     cv2.namedWindow('Receiver Side A')
-    cv2.namedWindow('Transmitter Side B')
     cv2.namedWindow('Receiver Side B')
 
-    cv2.setMouseCallback('Transmitter Side A', set_active_a)
-    cv2.setMouseCallback('Receiver Side A', set_active_a)
-    cv2.setMouseCallback('Transmitter Side B', set_active_b)
-    cv2.setMouseCallback('Receiver Side B', set_active_b)
-
-    print("Both sides ready. Click on a window to select it.\n")
+    # Show calibration patterns in loop
+    print("Showing calibration patterns...")
 
     while True:
-        # Get webcam frame or black background
         if cap is not None:
             ret, webcam_frame = cap.read()
             if not ret:
@@ -79,87 +54,94 @@ def test_harness() -> None:
         else:
             webcam_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
 
-        # Get transmitter outputs
         transmitter_a = cam_a._render_calibration_boundary()
         transmitter_b = cam_b._render_calibration_boundary()
 
-        # Each camera sees the other's transmitter overlaid on webcam
         receiver_a_feed = overlay_centered(webcam_frame, transmitter_b)
         receiver_b_feed = overlay_centered(webcam_frame, transmitter_a)
 
-        # Update camera inputs
         cam_a.test_camera_input = receiver_a_feed
         cam_b.test_camera_input = receiver_b_feed
 
-        # Create displays with calibration overlays
-        receiver_a_display = cam_a._render_receiver_display(receiver_a_feed)
-        receiver_b_display = cam_b._render_receiver_display(receiver_b_feed)
+        cv2.imshow('Receiver Side A', receiver_a_feed)
+        cv2.imshow('Receiver Side B', receiver_b_feed)
 
-        # Add active indicator
-        if active_side == 'a':
-            cv2.putText(
-                transmitter_a, "ACTIVE",
-                (transmitter_a.shape[1] - 120, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(
-                receiver_a_display, "ACTIVE",
-                (receiver_a_display.shape[1] - 120, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        else:
-            cv2.putText(
-                transmitter_b, "ACTIVE",
-                (transmitter_b.shape[1] - 120, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(
-                receiver_b_display, "ACTIVE",
-                (receiver_b_display.shape[1] - 120, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        if cv2.waitKey(30) & 0xFF == ord('q'):
+            return
 
-        # Display all windows
-        cv2.imshow('Transmitter Side A', transmitter_a)
-        cv2.imshow('Receiver Side A', receiver_a_display)
-        cv2.imshow('Transmitter Side B', transmitter_b)
-        cv2.imshow('Receiver Side B', receiver_b_display)
-
-        # Handle keyboard input
-        key = cv2.waitKey(30) & 0xFF
-        if key == ord('q'):
-            print("\nQuitting...")
+        # Check if stdin has input (non-blocking)
+        if select.select([sys.stdin], [], [], 0)[0]:
+            sys.stdin.readline()
             break
-        elif key == ord(' '):
-            # Try to lock corners on active camera
-            cam = cam_a if active_side == 'a' else cam_b
-            other_cam = cam_b if active_side == 'a' else cam_a
-            feed = receiver_a_feed if active_side == 'a' else receiver_b_feed
-            side_name = "Side A" if active_side == 'a' else "Side B"
 
-            if not cam._is_calibrated():
-                if cam._try_lock_corners(feed):
-                    print(f"✓✓✓ {side_name}: CALIBRATED!")
-                    print(
-                        f"    Corners: "
-                        f"{cam.locked_corners.astype(int).tolist()}")
-                    if not other_cam._is_calibrated():
-                        print("    Now calibrate the other side.")
-                else:
-                    print(f"✗ {side_name}: No boundary detected")
-            else:
-                print(f"{side_name} already calibrated")
+    # Lock both sides
+    print("\nLocking calibration...")
+    if cam_a._try_lock_corners(receiver_a_feed):
+        print(f"✓✓✓ Side A: CALIBRATED!")
+        print(f"    Corners: {cam_a.locked_corners.astype(int).tolist()}")
+    else:
+        print(f"✗ Side A: No boundary detected")
+        return
 
-            # Check if both are done
-            if cam_a._is_calibrated() and cam_b._is_calibrated():
-                print("\n✓✓✓ BOTH SIDES CALIBRATED!")
-                print(
-                    f"Side A corners: "
-                    f"{cam_a.locked_corners.astype(int).tolist()}")
-                print(
-                    f"Side B corners: "
-                    f"{cam_b.locked_corners.astype(int).tolist()}")
-                print("\nCalibration complete. Press 'q' to quit.")
+    if cam_b._try_lock_corners(receiver_b_feed):
+        print(f"✓✓✓ Side B: CALIBRATED!")
+        print(f"    Corners: {cam_b.locked_corners.astype(int).tolist()}")
+    else:
+        print(f"✗ Side B: No boundary detected")
+        return
+
+    print("\n✓✓✓ BOTH SIDES CALIBRATED!")
+
+    # Show locked rectangles
+    receiver_a_display = cam_a._render_receiver_display(receiver_a_feed)
+    receiver_b_display = cam_b._render_receiver_display(receiver_b_feed)
+    cv2.imshow('Receiver Side A', receiver_a_display)
+    cv2.imshow('Receiver Side B', receiver_b_display)
+    cv2.waitKey(1)
+
+    # Data transmission phase
+    input("\nPress Enter to send test pattern...")
+
+    test_data_a = Frame(data=np.random.randint(0, 8, (16, 16)))
+    test_data_b = Frame(data=np.random.randint(0, 8, (16, 16)))
+
+    print("\n--- Sending data ---")
+    print(f"Side A sending:\n{test_data_a.data}")
+    print(f"\nSide B sending:\n{test_data_b.data}")
 
     if cap is not None:
-        cap.release()
-    cv2.destroyAllWindows()
+        ret, webcam_frame = cap.read()
+        if not ret:
+            webcam_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    else:
+        webcam_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    tx_a_img = cam_a._render_data(test_data_a)
+    tx_b_img = cam_b._render_data(test_data_b)
+
+    receiver_a_feed = overlay_centered(webcam_frame, tx_b_img)
+    receiver_b_feed = overlay_centered(webcam_frame, tx_a_img)
+
+    cam_a.test_camera_input = receiver_a_feed
+    cam_b.test_camera_input = receiver_b_feed
+
+    cv2.imshow('Receiver Side A', receiver_a_feed)
+    cv2.imshow('Receiver Side B', receiver_b_feed)
+    cv2.waitKey(1)
+
+    input("\nPress Enter to receive and decode...")
+
+    print("\n--- Receiving data ---")
+    received_a = cam_a.receive()
+    received_b = cam_b.receive()
+
+    print(f"Side A received:\n{received_a.data}")
+    print(f"\nSide B received:\n{received_b.data}")
+
+    print(f"\nSide A match: {np.array_equal(received_a.data, test_data_b.data)}")
+    print(f"Side B match: {np.array_equal(received_b.data, test_data_a.data)}")
+
+    input("\nPress Enter to exit...")
 
 
 if __name__ == "__main__":

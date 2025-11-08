@@ -21,7 +21,7 @@ COLOR_MAP = [
 
 @dataclasses.dataclass
 class Frame:
-    data: NDArray[np.integer]
+    data: NDArray[np.int64]
 
 
 class Camera:
@@ -183,10 +183,60 @@ class Camera:
                 and self.warp_matrix is not None)
 
     def send(self, frame: Frame) -> None:
-        pass
+        cv2.imshow('Transmitter: Data', self._render_data(frame))
+
+    def _render_data(self, frame: Frame) -> NDArray[np.uint8]:
+        size = 600
+        img = np.ones((size, size, 3), dtype=np.uint8) * 255
+
+        data_start = 50
+        data_size = 500
+
+        cell_size = data_size / WIDTH
+        for row in range(HEIGHT):
+            for col in range(WIDTH):
+                value = frame.data[row, col]
+                color = COLOR_MAP[value]
+                y1 = int(data_start + row * cell_size)
+                y2 = int(data_start + (row + 1) * cell_size)
+                x1 = int(data_start + col * cell_size)
+                x2 = int(data_start + (col + 1) * cell_size)
+                img[y1:y2, x1:x2] = color
+        return img
 
     def receive(self) -> Frame:
-        pass
+        if not self._is_calibrated():
+            return Frame(data=np.zeros((HEIGHT, WIDTH), dtype=np.int64))
+
+        if self.test_mode:
+            frame = self.test_camera_input
+        else:
+            ret, frame = self.cap.read()
+            if not ret:
+                return Frame(data=np.zeros((HEIGHT, WIDTH), dtype=np.int64))
+
+        unwarped = cv2.warpPerspective(
+            frame, self.warp_matrix, (self.warp_size, self.warp_size))
+
+        cell_size = self.warp_size / WIDTH
+        data = np.zeros((HEIGHT, WIDTH), dtype=np.int64)
+        for row in range(HEIGHT):
+            for col in range(WIDTH):
+                y = int((row + 0.5) * cell_size)
+                x = int((col + 0.5) * cell_size)
+                pixel = unwarped[y, x]
+
+                # Find closest color in COLOR_MAP
+                min_dist = float('inf')
+                best_idx = 0
+                for idx, color in enumerate(COLOR_MAP):
+                    dist = np.sum((pixel - np.array(color)) ** 2)
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_idx = idx
+                data[row, col] = best_idx
+
+        return Frame(data=data)
 
 
 if __name__ == "__main__":
