@@ -72,7 +72,7 @@ pip install -r requirements.txt
 
 **Terminal 1 - Transmitter (Display computer):**
 ```bash
-python transmitter.py
+uv run transmitter.py
 ```
 - Starts Flask server on `http://0.0.0.0:5000`
 - Displays 64×64 color grid fullscreen
@@ -80,7 +80,7 @@ python transmitter.py
 
 **Terminal 2 - Receiver (Camera computer):**
 ```bash
-python receiver.py
+uv run receiver.py
 ```
 - Opens default camera (device 0)
 - Displays split-screen with camera + decoded message
@@ -90,35 +90,35 @@ python receiver.py
 **Terminal 3 - Client (Message sender):**
 ```bash
 # Interactive mode (default)
-python client.py
+uv run client.py
 
 # Or specify different server
-python client.py --server http://192.168.1.100:5000
+uv run client.py --server http://192.168.1.100:5000
 
 # Send single message
-python client.py -m "Hello from NO-MARGIN-VIS!"
+uv run client.py -m "Hello from NO-MARGIN-VIS!"
 
 # Check status
-python client.py --status
+uv run client.py --status
 ```
 
 ### Network Setup (Two Different Machines)
 
 1. **On Transmitter Machine:**
    ```bash
-   python transmitter.py
+   uv run transmitter.py
    ```
    Note the IP address and port (e.g., `192.168.1.10:5000`)
 
 2. **On Receiver Machine:**
    ```bash
-   python receiver.py
+   uv run receiver.py
    ```
    Make sure the camera is pointing at the transmitter display
 
 3. **On Client Machine (can be any machine):**
    ```bash
-   python client.py --server http://192.168.1.10:5000
+   uv run client.py --server http://192.168.1.10:5000
    > Type your message here
    ```
 
