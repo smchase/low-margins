@@ -291,7 +291,15 @@ class Receiver:
         return rect
 
 
-def main():
+def main(camera=None):
+    """
+    Main function for Visual Data Link.
+
+    Args:
+        camera: Optional camera object (e.g., cv2.VideoCapture or virtual camera).
+                If None, will create a real camera with cv2.VideoCapture(0) in rx mode.
+                Must implement: read(), set(), isOpened(), release() methods.
+    """
     parser = argparse.ArgumentParser(description='Visual Data Link')
     parser.add_argument('--mode', required=True, choices=['tx', 'rx'],
                        help='Transmitter or receiver')
@@ -338,7 +346,12 @@ def main():
         print("  q   - Quit")
         print()
 
-        cap = cv2.VideoCapture(0)
+        # Use provided camera or create a real one
+        if camera is None:
+            cap = cv2.VideoCapture(0)
+        else:
+            cap = camera
+
         if not cap.isOpened():
             print("Error: Could not open camera")
             sys.exit(1)

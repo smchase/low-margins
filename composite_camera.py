@@ -44,11 +44,14 @@ class CompositeCamera:
         self.tx.calibration_mode = True
         self.calibration_frames = 0
 
-        # Set camera resolution
-        self.width = 1280
-        self.height = 720
-        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        # Try to set camera resolution, but detect actual resolution on first read
+        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+
+        # Actual width and height will be detected on first read
+        self.width = None
+        self.height = None
+        self.first_read = True
 
         print(f"[CompositeCamera] Initialized with {grid_size}x{grid_size} grid, {cell_size}px cells")
         print(f"[CompositeCamera] Starting in calibration mode (flashing)...")
@@ -64,6 +67,12 @@ class CompositeCamera:
         if not ret:
             return False, None
 
+        # Detect actual camera resolution on first read
+        if self.first_read:
+            self.height, self.width = frame.shape[:2]
+            self.first_read = False
+            print(f"[CompositeCamera] Detected camera resolution: {self.width}x{self.height}")
+
         # Render TX grid
         grid_img = self.tx.render()  # Grayscale image
         grid_bgr = cv2.cvtColor(grid_img, cv2.COLOR_GRAY2BGR)
@@ -71,11 +80,19 @@ class CompositeCamera:
         # Get grid dimensions
         grid_h, grid_w = grid_bgr.shape[:2]
 
+        # If grid is too large for frame, resize it
+        if grid_h > self.height or grid_w > self.width:
+            scale = min(self.height / grid_h, self.width / grid_w) * 0.9  # 90% of available space
+            new_h, new_w = int(grid_h * scale), int(grid_w * scale)
+            grid_bgr = cv2.resize(grid_bgr, (new_w, new_h))
+            grid_h, grid_w = new_h, new_w
+            print(f"[CompositeCamera] Grid too large, scaled to {grid_w}x{grid_h}")
+
         # Calculate position to center grid on frame
         x = (self.width - grid_w) // 2
         y = (self.height - grid_h) // 2
 
-        # Ensure within bounds
+        # Ensure within bounds (should be safe now, but keep as safety check)
         x = max(0, min(x, self.width - grid_w))
         y = max(0, min(y, self.height - grid_h))
 
@@ -84,9 +101,6 @@ class CompositeCamera:
 
         # Place grid directly on top (fully opaque, no blending)
         composite[y:y+grid_h, x:x+grid_w] = grid_bgr
-
-        # Draw border around grid for visibility
-        cv2.rectangle(composite, (x, y), (x+grid_w, y+grid_h), (0, 255, 0), 2)
 
         # Auto-switch from calibration to normal mode
         self.calibration_frames += 1
