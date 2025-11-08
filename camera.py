@@ -58,7 +58,6 @@ class Camera:
                 if not ret:
                     print("Failed to read from camera")
                     return False
-                frame = cv2.flip(frame, 1)
 
             cv2.imshow(
                 'Transmitter: Calibration Pattern',
@@ -90,14 +89,15 @@ class Camera:
     def _render_calibration_boundary(self) -> NDArray[np.uint8]:
         size = 600
         marker_size = 100
+        padding = 50
         img = np.ones((size, size, 3), dtype=np.uint8) * 255
         aruco_dict = cv2.aruco.getPredefinedDictionary(
             cv2.aruco.DICT_4X4_50)
         positions = [
-            (0, 0),
-            (size - marker_size, 0),
-            (size - marker_size, size - marker_size),
-            (0, size - marker_size),
+            (padding, padding),
+            (size - marker_size - padding, padding),
+            (size - marker_size - padding, size - marker_size - padding),
+            (padding, size - marker_size - padding),
         ]
 
         for marker_id, (x, y) in enumerate(positions):
