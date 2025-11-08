@@ -88,6 +88,13 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05):
     return color_indices
 
 
+def classify_frame_phase(color_pattern):
+    """Return 'lower' for multi-color frames, 'upper' for binary frames."""
+    if color_pattern is None:
+        return None
+    return "upper" if color_pattern.max() <= 1 else "lower"
+
+
 def main():
     print("\n" + "="*70)
     print(f"CODEC COMPOSITE CAMERA TEST - {TEST_TENSOR_ROWS}x{TEST_TENSOR_COLS} Tensor Transmission")
@@ -170,6 +177,17 @@ def main():
                     row_slice_idx = cap.current_row_slice
                     col_slice_idx = cap.current_col_slice
                     color_frame_idx = cap.current_color_frame
+
+                    phase = classify_frame_phase(color_pattern)
+                    expected_phase = "lower" if color_frame_idx == 0 else "upper"
+
+                    if phase != expected_phase:
+                        raise RuntimeError(
+                            f"Phase mismatch detected: grid {grid_idx+1}, "
+                            f"slice ({row_slice_idx+1},{col_slice_idx+1}), "
+                            f"expected {expected_phase}, got {phase}"
+                        )
+
                     received_color_frames[grid_idx][row_slice_idx][col_slice_idx].append(color_pattern.copy())
 
                     # Count total received

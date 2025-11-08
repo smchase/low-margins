@@ -224,8 +224,10 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05):
     cell_size = size / grid_size
     border = int(cell_size * border_ratio)
     color_indices = np.zeros((grid_size, grid_size), dtype=np.uint8)
+    samples = []
 
     for i in range(grid_size):
+        row_samples = []
         for j in range(grid_size):
             y1 = int(i * cell_size + border)
             y2 = int((i + 1) * cell_size - border)
@@ -233,20 +235,19 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05):
             x2 = int((j + 1) * cell_size - border)
 
             if y2 <= y1 or x2 <= x1:
+                row_samples.append(np.array([0, 0, 0], dtype=np.float32))
                 continue
 
             cell_region = warped[y1:y2, x1:x2]
             mean_color = cell_region.mean(axis=(0, 1))
+            row_samples.append(mean_color)
+        samples.append(row_samples)
 
-            min_dist = float("inf")
-            best_idx = 0
-            for idx, palette_color in enumerate(COLORS_8):
-                dist = np.sum((mean_color - palette_color) ** 2)
-                if dist < min_dist:
-                    min_dist = dist
-                    best_idx = idx
-
-            color_indices[i, j] = best_idx
+    samples = np.array(samples, dtype=np.float32)
+    palette = COLORS_8.astype(np.float32)
+    diff = samples[:, :, None, :] - palette[None, None, :, :]
+    dist = np.sum(diff * diff, axis=-1)
+    color_indices = np.argmin(dist, axis=2).astype(np.uint8)
 
     return color_indices
 
@@ -278,6 +279,20 @@ def count_changed_cells(a, b):
     if a is None or b is None:
         return 0
     return int(np.count_nonzero(a != b))
+
+
+def classify_frame_phase(pattern):
+    """Return 'lower' for multi-color frames, 'upper' for binary frames."""
+    if pattern is None:
+        return None
+
+    total = pattern.size
+    if total == 0:
+        return None
+
+    if pattern.max() <= 1:
+        return "upper"
+    return "lower"
 
 
 def compute_slice_layout(rows, cols, grid_size):
@@ -553,10 +568,14 @@ def run_rx(args):
     capture_active = False
     last_pattern = None
     pending_pattern = None
+    pending_phase = None
     pending_consistency = 0
+    phase_seen_time = None
     capture_threshold = max(0.0, min(1.0, args.capture_threshold))
     capture_tolerance = max(0.0, min(1.0, args.capture_tolerance))
     capture_stability = max(1, args.capture_stability)
+    capture_timeout = max(0.0, args.capture_timeout)
+    expected_phase = "lower"
 
     print("\n" + "=" * 70)
     print("RX MODE - CODEC VISUAL LINK")
@@ -596,6 +615,10 @@ def run_rx(args):
                 if is_calibration_pattern(pattern) or is_start_signal(pattern):
                     continue
 
+                phase = classify_frame_phase(pattern)
+                if phase is None:
+                    continue
+
                 total_cells = pattern.size
                 min_changed = max(1, int(total_cells * capture_threshold))
                 tolerance_cells = max(1, int(total_cells * capture_tolerance))
@@ -603,8 +626,21 @@ def run_rx(args):
                 if diff_last < min_changed:
                     continue
 
-                if pending_pattern is None:
+                now = time.time()
+
+                if phase != expected_phase:
+                    phase_seen_time = None
+                    pending_pattern = None
+                    pending_phase = None
+                    pending_consistency = 0
+                    continue
+
+                if phase_seen_time is None:
+                    phase_seen_time = now
+
+                if pending_pattern is None or pending_phase != phase:
                     pending_pattern = pattern.copy()
+                    pending_phase = phase
                     pending_consistency = 1
                     continue
 
@@ -615,15 +651,27 @@ def run_rx(args):
                 else:
                     pending_pattern = pattern.copy()
                     pending_consistency = 1
+                    continue
 
-                if pending_consistency >= capture_stability:
+                stable_enough = pending_consistency >= capture_stability
+                timeout_elapsed = (
+                    capture_timeout > 0 and
+                    phase_seen_time is not None and
+                    now - phase_seen_time >= capture_timeout
+                )
+
+                if stable_enough or timeout_elapsed:
                     last_pattern = pending_pattern.copy()
                     captured_frames.append(last_pattern.copy())
                     pending_pattern = None
+                    pending_phase = None
                     pending_consistency = 0
+                    phase_seen_time = None
                     total_captured = len(captured_frames)
                     print(f"\r[RX] Captured frame {total_captured}/{total_frames_needed} "
-                          f"(diff vs last {diff_last})", end='', flush=True)
+                          f"(phase {phase}, diff vs last {diff_last})", end='', flush=True)
+
+                    expected_phase = "upper" if expected_phase == "lower" else "lower"
 
                     if total_captured >= total_frames_needed:
                         print("\n[RX] Frames collected - decoding...")
@@ -639,11 +687,16 @@ def run_rx(args):
                         except Exception as err:
                             print(f"[RX] ✗ Decode failed: {err}")
                         capture_active = False
+                        phase_seen_time = None
+                        expected_phase = "lower"
             else:
                 capture_active = False
                 last_pattern = None
                 pending_pattern = None
+                pending_phase = None
                 pending_consistency = 0
+                phase_seen_time = None
+                expected_phase = "lower"
 
         if capture_active:
             info = f"CAPTURING {len(captured_frames)}/{total_frames_needed}"
@@ -669,6 +722,9 @@ def run_rx(args):
                 last_pattern = None
                 pending_pattern = None
                 pending_consistency = 0
+                pending_phase = None
+                phase_seen_time = None
+                expected_phase = "lower"
                 print("\n[RX] Calibration reset")
             else:
                 if rx.calibrate(frame):
@@ -684,12 +740,18 @@ def run_rx(args):
                 last_pattern = None
                 pending_pattern = None
                 pending_consistency = 0
+                pending_phase = None
+                phase_seen_time = None
+                expected_phase = "lower"
                 print("\n[RX] Capture started - waiting for frames...")
         elif key == ord('r'):
             captured_frames.clear()
             last_pattern = None
             pending_pattern = None
             pending_consistency = 0
+            pending_phase = None
+            phase_seen_time = None
+            expected_phase = "lower"
             capture_active = False
             print("\n[RX] Captured frames cleared")
         elif key == ord('f'):
@@ -725,6 +787,8 @@ def build_arg_parser():
                         help='Fraction of cells allowed to differ between stability samples (RX)')
     parser.add_argument('--capture-stability', type=int, default=2,
                         help='Number of consecutive stable samples before recording a frame (RX)')
+    parser.add_argument('--capture-timeout', type=float, default=0.4,
+                        help='Seconds to wait before accepting latest sample even if stability not reached (RX)')
     return parser
 
 
