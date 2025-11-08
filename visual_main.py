@@ -251,6 +251,16 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05):
     return color_indices
 
 
+def is_calibration_pattern(color_indices):
+    """Heuristic: calibration flashes only use black/white cells."""
+    if color_indices is None:
+        return True
+    uniques = np.unique(color_indices)
+    if uniques.size == 0:
+        return True
+    return np.all(np.isin(uniques, (0, 7)))
+
+
 def compute_slice_layout(rows, cols, grid_size):
     rows_per_slice = grid_size
     cols_per_slice = grid_size
@@ -534,6 +544,8 @@ def run_rx(args):
             if capture_active:
                 pattern = rx.read_color_pattern(frame, args.grid_size)
                 if pattern is not None:
+                    if is_calibration_pattern(pattern):
+                        continue
                     pattern_hash = pattern.tobytes()
                     if pattern_hash != last_hash:
                         last_hash = pattern_hash
