@@ -489,6 +489,33 @@ class CodecTransmitterDisplay:
         return self.total_frames
 
 
+def create_test_pattern_tensor(rows, cols):
+    """Create a test pattern tensor with known values for verification."""
+    tensor = np.zeros((rows, cols), dtype=np.float16)
+    
+    # Pattern 1: Diagonal gradient
+    for i in range(rows):
+        for j in range(cols):
+            # Create a gradient that changes along diagonals
+            value = ((i + j) % 256) / 128.0 - 1.0  # Range -1 to 1
+            tensor[i, j] = value
+    
+    # Pattern 2: Add some specific known values at corners and center
+    if rows > 0 and cols > 0:
+        tensor[0, 0] = 0.5      # Top-left
+        tensor[0, -1] = -0.5    # Top-right
+        tensor[-1, 0] = 0.25    # Bottom-left
+        tensor[-1, -1] = -0.25  # Bottom-right
+        
+        # Center values
+        center_r, center_c = rows // 2, cols // 2
+        tensor[center_r, center_c] = 1.0
+        if center_r > 0 and center_c > 0:
+            tensor[center_r-1, center_c-1] = -1.0
+            
+    return tensor.astype(np.float16)
+
+
 def load_tensor(args):
     if args.tensor:
         tensor = np.load(args.tensor)
@@ -498,6 +525,14 @@ def load_tensor(args):
             tensor = tensor.astype(np.float16)
         return tensor
 
+    if args.test_pattern:
+        # Create a known test pattern
+        tensor = create_test_pattern_tensor(args.rows, args.cols)
+        print(f"[TX] Using test pattern tensor")
+        print(f"[TX] First row: {tensor[0, :10]}")
+        print(f"[TX] Diagonal: {[tensor[i, i] for i in range(min(10, args.rows, args.cols))]}")
+        return tensor
+    
     rng = np.random.default_rng(args.seed)
     tensor = rng.standard_normal((args.rows, args.cols)).astype(np.float16)
     return tensor
@@ -829,6 +864,38 @@ def run_rx(args):
                                 print(f"[RX] Valid values: min={valid_values.min():.3f}, "
                                       f"max={valid_values.max():.3f}, mean={valid_values.mean():.3f}")
                             
+                            # If test pattern mode, verify known values
+                            if args.verify_test_pattern:
+                                print("\n[RX] Verifying test pattern values...")
+                                expected = create_test_pattern_tensor(args.rows, args.cols)
+                                
+                                # Check corner values
+                                checks = [
+                                    ((0, 0), "Top-left"),
+                                    ((0, -1), "Top-right"), 
+                                    ((-1, 0), "Bottom-left"),
+                                    ((-1, -1), "Bottom-right"),
+                                    ((args.rows//2, args.cols//2), "Center")
+                                ]
+                                
+                                all_correct = True
+                                for (r, c), name in checks:
+                                    expected_val = expected[r, c]
+                                    decoded_val = decoded_tensor[r, c]
+                                    if np.isnan(decoded_val):
+                                        print(f"[RX] ❌ {name}: Expected {expected_val:.3f}, got NaN")
+                                        all_correct = False
+                                    elif abs(decoded_val - expected_val) < 0.01:  # Allow small error
+                                        print(f"[RX] ✓ {name}: {decoded_val:.3f} (expected {expected_val:.3f})")
+                                    else:
+                                        print(f"[RX] ❌ {name}: {decoded_val:.3f} (expected {expected_val:.3f})")
+                                        all_correct = False
+                                
+                                if all_correct:
+                                    print("[RX] ✅ All test values verified correctly!")
+                                else:
+                                    print("[RX] ⚠️  Some test values didn't match")
+                            
                             if args.save_decoded:
                                 np.save(args.save_decoded, decoded_tensor)
                                 print(f"[RX] Saved tensor to {args.save_decoded}")
@@ -935,6 +1002,7 @@ def build_arg_parser():
     parser.add_argument('--cols', type=int, default=TEST_TENSOR_COLS, help='Tensor cols')
     parser.add_argument('--tensor', type=str, help='Path to .npy tensor for TX mode')
     parser.add_argument('--seed', type=int, default=42, help='Seed for random tensor (TX)')
+    parser.add_argument('--test-pattern', action='store_true', help='Use test pattern tensor instead of random (TX)')
     parser.add_argument('--camera-index', type=int, default=0, help='Camera index for RX mode')
     parser.add_argument('--save-decoded', type=str, help='Path to save decoded tensor (RX mode)')
     parser.add_argument('--capture-threshold', type=float, default=0.05,
@@ -951,6 +1019,8 @@ def build_arg_parser():
                         help='Force alternating lower/upper phase decoding (RX)')
     parser.add_argument('--capture-interval', type=float, default=0.3,
                         help='Minimum seconds between frame captures (RX)')
+    parser.add_argument('--verify-test-pattern', action='store_true',
+                        help='Verify decoded tensor against test pattern (RX)')
     return parser
 
 
