@@ -483,19 +483,6 @@ class CodecTransmitterDisplay:
         image[border:-border, border:border+frame_width] = [0, 0, 0]
         image[border:-border, -border-frame_width:-border] = [0, 0, 0]
 
-        phase_str = "lower(0-7)" if self.current_color_frame == 0 else "upper(0-1)"
-        status = "CALIBRATION" if not self.transmitting else (
-            "START SIGNAL" if self.remaining_start_frames > 0 else
-            "DONE" if self.done else
-            f"G{self.current_grid_idx+1}/{self.encoded_grids.shape[0]} "
-            f"R{self.current_row_slice+1}/{self.num_row_slices} "
-            f"C{self.current_col_slice+1}/{self.num_col_slices} "
-            f"Phase: {phase_str}"
-        )
-        cv2.putText(image, f"TX MODE - {status}",
-                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
-        cv2.putText(image, "Controls: P=start  R=reset  Q=quit",
-                    (20, final_size - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
         return image
 
     def expected_frames(self):
