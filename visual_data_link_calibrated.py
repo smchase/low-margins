@@ -362,195 +362,223 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Visual Data Link - Calibration Based')
+    parser.add_argument('--mode', type=str, required=True, choices=['tx', 'rx'],
+                       help='Run as transmitter (tx) or receiver (rx)')
     parser.add_argument('--grid-size', type=int, default=24)
     parser.add_argument('--cell-size', type=int, default=20)
     parser.add_argument('--message', type=str, default=None)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--load-calibration', action='store_true',
-                       help='Load calibration from file')
+                       help='Load calibration from file (RX only)')
 
     args = parser.parse_args()
 
+    is_tx = args.mode == 'tx'
+    is_rx = args.mode == 'rx'
+
     print("\n" + "="*70)
-    print("Visual Data Link - Calibration Based")
+    print(f"Visual Data Link - {'TRANSMITTER' if is_tx else 'RECEIVER'}")
     print("="*70)
     print(f"\nGrid: {args.grid_size}x{args.grid_size} ({args.grid_size**2 // 8} bytes)")
-    print("\nCalibration Workflow:")
-    print("  1. TX: Press 'c' to enter CALIBRATION MODE (flashing)")
-    print("  2. RX: Press 'c' to LOCK onto the flashing pattern")
-    print("  3. TX: Press 'c' again to EXIT calibration (start transmitting)")
-    print("\nControls:")
-    print("  c       - Toggle calibration mode (TX) / Calibrate (RX)")
-    print("  SPACE/r - New random message")
-    print("  d       - Toggle debug")
-    print("  s       - Save calibration to file")
-    print("  l       - Load calibration from file")
-    print("  q       - Quit")
+
+    if is_tx:
+        print("\nTransmitter Controls:")
+        print("  c       - Toggle CALIBRATION MODE (flashing)")
+        print("  SPACE/r - New random message")
+        print("  q       - Quit")
+        print("\nCalibration:")
+        print("  1. Press 'c' to start flashing")
+        print("  2. Wait for RX to lock on")
+        print("  3. Press 'c' again to stop flashing and transmit data")
+    else:
+        print("\nReceiver Controls:")
+        print("  c       - LOCK onto calibration pattern")
+        print("  d       - Toggle debug windows")
+        print("  s       - Save calibration to file")
+        print("  l       - Load calibration from file")
+        print("  q       - Quit")
+        print("\nCalibration:")
+        print("  1. Make sure TX is flashing (TX pressed 'c')")
+        print("  2. Point camera at TX screen")
+        print("  3. Press 'c' to lock on")
+
     print("="*70 + "\n")
 
-    # Initialize camera
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Error: Could not open camera")
-        sys.exit(1)
-
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
-    # Initialize
-    transmitter = GridTransmitter(grid_size=args.grid_size, cell_size=args.cell_size)
-    receiver = GridReceiver(grid_size=args.grid_size, debug=args.debug)
-
-    # Try to load calibration
-    if args.load_calibration:
-        receiver.load_calibration()
-
-    # Generate message
-    max_bytes = args.grid_size**2 // 8
-    if args.message:
-        message = args.message[:max_bytes]
-        message_bytes = message.encode('utf-8')
-        if len(message_bytes) < max_bytes:
-            message_bytes = message_bytes + b'\x00' * (max_bytes - len(message_bytes))
+    # Initialize camera (only for RX)
+    if is_rx:
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            print("Error: Could not open camera")
+            sys.exit(1)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     else:
-        chars = string.ascii_letters + string.digits + ' !?.'
-        message = ''.join(random.choice(chars) for _ in range(max_bytes))
-        message_bytes = message.encode('utf-8')
+        cap = None
 
-    print(f"Message: '{message_bytes.decode('utf-8', errors='replace').rstrip(chr(0))}'")
-    print()
+    # Initialize transmitter and/or receiver based on mode
+    if is_tx:
+        transmitter = GridTransmitter(grid_size=args.grid_size, cell_size=args.cell_size)
+        receiver = None
+    else:
+        transmitter = None
+        receiver = GridReceiver(grid_size=args.grid_size, debug=args.debug)
+        # Try to load calibration
+        if args.load_calibration:
+            receiver.load_calibration()
 
-    transmitter.set_pattern_from_bytes(message_bytes)
-    transmitted_message = message_bytes
+    # Generate message (TX only)
+    max_bytes = args.grid_size**2 // 8
+    if is_tx:
+        if args.message:
+            message = args.message[:max_bytes]
+            message_bytes = message.encode('utf-8')
+            if len(message_bytes) < max_bytes:
+                message_bytes = message_bytes + b'\x00' * (max_bytes - len(message_bytes))
+        else:
+            chars = string.ascii_letters + string.digits + ' !?.'
+            message = ''.join(random.choice(chars) for _ in range(max_bytes))
+            message_bytes = message.encode('utf-8')
+
+        print(f"Message: '{message_bytes.decode('utf-8', errors='replace').rstrip(chr(0))}'")
+        print()
+
+        transmitter.set_pattern_from_bytes(message_bytes)
+        transmitted_message = message_bytes
+    else:
+        transmitted_message = None
 
     last_stats_time = time.time()
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        # TX MODE - Just display the transmitter
+        if is_tx:
+            transmitter.display()
+            key = cv2.waitKey(1) & 0xFF
 
-        # Display transmitter
-        transmitter.display()
+            if key == ord('q'):
+                break
+            elif key == ord('c'):
+                # Toggle calibration mode
+                transmitter.set_calibration_mode(not transmitter.calibration_mode)
+                mode_text = "ON (FLASHING)" if transmitter.calibration_mode else "OFF (TRANSMITTING)"
+                print(f"\nCalibration mode: {mode_text}")
+            elif key == ord(' ') or key == ord('r'):
+                # Generate new message
+                chars = string.ascii_letters + string.digits + ' !?.'
+                message = ''.join(random.choice(chars) for _ in range(max_bytes))
+                transmitted_message = message.encode('utf-8')
+                transmitter.set_pattern_from_bytes(transmitted_message)
+                print(f"\nNew message: '{message}'")
 
-        # Read grid
-        if receiver.calibrated:
-            # Fast path - read from locked position
-            detected_pattern = receiver.read_from_locked_position(frame)
+        # RX MODE - Capture and read
         else:
-            detected_pattern = None
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        # Visualize
-        display_frame = frame.copy()
-
-        # Draw locked region if calibrated
-        if receiver.calibrated and receiver.locked_corners is not None:
-            corners = receiver.locked_corners.astype(np.int32)
-            cv2.polylines(display_frame, [corners], True, (0, 255, 0), 3)
-            for corner in corners:
-                cv2.circle(display_frame, tuple(corner), 8, (0, 255, 255), -1)
-
-        # Status
-        info_y = 30
-        if receiver.calibrated:
-            cv2.putText(display_frame, "LOCKED", (10, info_y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        else:
-            cv2.putText(display_frame, "NOT CALIBRATED - Press 'c'", (10, info_y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-        # Stats
-        stats = receiver.get_stats()
-        info_y += 40
-        cv2.putText(display_frame,
-                   f"Success: {stats['success_rate']:.1f}%",
-                   (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-        if stats['bytes_per_sec'] > 0:
-            info_y += 35
-            cv2.putText(display_frame,
-                       f"Rate: {stats['frames_per_sec']:.1f} fps, {stats['bytes_per_sec']:.0f} B/s",
-                       (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-        # Show messages
-        if detected_pattern is not None:
-            rx_bytes = receiver.pattern_to_bytes(detected_pattern)
-            rx_message = rx_bytes.decode('utf-8', errors='replace').rstrip('\x00')
-            tx_message = transmitted_message.decode('utf-8', errors='replace').rstrip('\x00')
-
-            match = rx_bytes == transmitted_message
-            match_color = (0, 255, 255) if match else (0, 165, 255)
-            match_text = "MATCH!" if match else "MISMATCH"
-
-            cv2.putText(display_frame, match_text, (10, display_frame.shape[0] - 80),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, match_color, 2)
-
-            max_len = 40
-            tx_disp = tx_message[:max_len] + ('...' if len(tx_message) > max_len else '')
-            rx_disp = rx_message[:max_len] + ('...' if len(rx_message) > max_len else '')
-
-            cv2.putText(display_frame, f"TX: {tx_disp}", (10, display_frame.shape[0] - 50),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(display_frame, f"RX: {rx_disp}", (10, display_frame.shape[0] - 25),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-
-            # Print received message when it changes
-            if match:
-                print(f"\r✓ Received: '{rx_message[:60]}'", end='', flush=True)
-
-        cv2.imshow('Camera Feed', display_frame)
-
-        # Debug windows
-        if receiver.debug:
-            for name, img in receiver.debug_images.items():
-                cv2.imshow(f'Debug: {name}', img)
-
-        # Stats
-        if time.time() - last_stats_time > 5.0 and stats['bytes_per_sec'] > 0:
-            print(f"\nStats: {stats['frames_per_sec']:.1f} fps | {stats['bytes_per_sec']:.0f} B/s")
-            last_stats_time = time.time()
-
-        # Input
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord('q'):
-            break
-        elif key == ord('c'):
+            # Read grid if calibrated
             if receiver.calibrated:
-                # Reset calibration
-                receiver.calibrated = False
-                receiver.locked_corners = None
-                print("\n✗ Calibration reset. Press 'c' to recalibrate.")
+                detected_pattern = receiver.read_from_locked_position(frame)
             else:
-                # Try to calibrate
-                if receiver.calibrate(frame):
-                    transmitter.set_calibration_mode(False)  # Turn off flashing on TX
+                detected_pattern = None
+
+            # Visualize
+            display_frame = frame.copy()
+
+            # Draw locked region if calibrated
+            if receiver.calibrated and receiver.locked_corners is not None:
+                corners = receiver.locked_corners.astype(np.int32)
+                cv2.polylines(display_frame, [corners], True, (0, 255, 0), 3)
+                for corner in corners:
+                    cv2.circle(display_frame, tuple(corner), 8, (0, 255, 255), -1)
+
+            # Status
+            info_y = 30
+            if receiver.calibrated:
+                cv2.putText(display_frame, "LOCKED", (10, info_y),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            else:
+                cv2.putText(display_frame, "NOT CALIBRATED - Press 'c'", (10, info_y),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+            # Stats
+            stats = receiver.get_stats()
+            info_y += 40
+            cv2.putText(display_frame,
+                       f"Success: {stats['success_rate']:.1f}%",
+                       (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            if stats['bytes_per_sec'] > 0:
+                info_y += 35
+                cv2.putText(display_frame,
+                           f"Rate: {stats['frames_per_sec']:.1f} fps, {stats['bytes_per_sec']:.0f} B/s",
+                           (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+            # Show received message
+            if detected_pattern is not None:
+                rx_bytes = receiver.pattern_to_bytes(detected_pattern)
+                rx_message = rx_bytes.decode('utf-8', errors='replace').rstrip('\x00')
+
+                cv2.putText(display_frame, "RECEIVING", (10, display_frame.shape[0] - 50),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
+                max_len = 50
+                rx_disp = rx_message[:max_len] + ('...' if len(rx_message) > max_len else '')
+                cv2.putText(display_frame, f"RX: {rx_disp}", (10, display_frame.shape[0] - 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+                # Print to terminal
+                print(f"\r✓ Received: '{rx_message[:70]}'", end='', flush=True)
+
+            cv2.imshow('Camera Feed', display_frame)
+
+            # Debug windows
+            if receiver.debug:
+                for name, img in receiver.debug_images.items():
+                    cv2.imshow(f'Debug: {name}', img)
+
+            # Stats
+            if time.time() - last_stats_time > 5.0 and stats['bytes_per_sec'] > 0:
+                print(f"\nStats: {stats['frames_per_sec']:.1f} fps | {stats['bytes_per_sec']:.0f} B/s")
+                last_stats_time = time.time()
+
+            # Input
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord('q'):
+                break
+            elif key == ord('c'):
+                if receiver.calibrated:
+                    # Reset calibration
+                    receiver.calibrated = False
+                    receiver.locked_corners = None
+                    print("\n✗ Calibration reset. Press 'c' to recalibrate.")
                 else:
-                    print("\n✗ Calibration failed. Make sure TX is in calibration mode (press 'c' on TX)")
-                    transmitter.set_calibration_mode(True)  # Turn on flashing on TX
-        elif key == ord(' ') or key == ord('r'):
-            chars = string.ascii_letters + string.digits + ' !?.'
-            message = ''.join(random.choice(chars) for _ in range(max_bytes))
-            transmitted_message = message.encode('utf-8')
-            transmitter.set_pattern_from_bytes(transmitted_message)
-            print(f"\nNew message: '{message}'")
-        elif key == ord('d'):
-            receiver.debug = not receiver.debug
-            if not receiver.debug:
-                for name in list(receiver.debug_images.keys()):
-                    cv2.destroyWindow(f'Debug: {name}')
-            print(f"\nDebug: {'ON' if receiver.debug else 'OFF'}")
-        elif key == ord('s'):
-            receiver.save_calibration()
-        elif key == ord('l'):
-            receiver.load_calibration()
+                    # Try to calibrate
+                    if receiver.calibrate(frame):
+                        print("✓ Success! TX can now stop flashing (press 'c' on TX)")
+                    else:
+                        print("\n✗ Calibration failed. Make sure TX is flashing (press 'c' on TX)")
+            elif key == ord('d'):
+                receiver.debug = not receiver.debug
+                if not receiver.debug:
+                    for name in list(receiver.debug_images.keys()):
+                        cv2.destroyWindow(f'Debug: {name}')
+                print(f"\nDebug: {'ON' if receiver.debug else 'OFF'}")
+            elif key == ord('s'):
+                receiver.save_calibration()
+            elif key == ord('l'):
+                receiver.load_calibration()
 
-    print("\n\nFinal stats:")
-    stats = receiver.get_stats()
-    print(f"  Success rate: {stats['success_rate']:.1f}%")
-    print(f"  Total reads: {stats['successful_reads'] + stats['failed_reads']}")
+    # Cleanup
+    print("\n\n")
+    if is_rx:
+        stats = receiver.get_stats()
+        print(f"Final stats:")
+        print(f"  Success rate: {stats['success_rate']:.1f}%")
+        print(f"  Total reads: {stats['successful_reads'] + stats['failed_reads']}")
+        cap.release()
 
-    cap.release()
     cv2.destroyAllWindows()
 
 
