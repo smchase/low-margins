@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""
+Convenience wrapper to run video-tunnel
+"""
+import sys
+from src.video_tunnel.__main__ import main
+
+if __name__ == "__main__":
+    main()
