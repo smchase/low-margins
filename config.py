@@ -1,7 +1,7 @@
 """Global configuration shared across transmitter and receiver."""
 
 # Visual grid resolution used on screen and by the receiver lock.
-VISUAL_GRID_SIZE = 64
+VISUAL_GRID_SIZE = 32
 
 # Default frames-per-second for automatic transmission.
 TRANSMISSION_FPS = 2.0

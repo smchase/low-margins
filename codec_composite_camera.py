@@ -37,7 +37,7 @@ class CodecCompositeCamera:
     - Total: 4 grids × 2 frames = 8 frames
     """
 
-    def __init__(self, tensor, cell_size=30, grid_size=VISUAL_GRID_SIZE, fps=TRANSMISSION_FPS):
+    def __init__(self, tensor, cell_size=30, grid_size=VISUAL_GRID_SIZE, fps=TRANSMISSION_FPS, start_signal_seconds=1.0):
         """
         Initialize codec composite camera.
 
@@ -55,6 +55,7 @@ class CodecCompositeCamera:
         self.cell_size = cell_size
         self.tensor = tensor
         self.fps = fps
+        self.start_signal_seconds = max(0.0, start_signal_seconds)
 
         # Get tensor dimensions
         rows, cols = tensor.shape
@@ -97,6 +98,11 @@ class CodecCompositeCamera:
         import time
         self.last_frame_time = time.time()
         self.frame_interval = 1.0 / fps
+        if self.start_signal_seconds > 0:
+            self.start_signal_frames = max(1, int(round(self.start_signal_seconds * fps)))
+        else:
+            self.start_signal_frames = 0
+        self.remaining_start_frames = 0
 
         # Camera resolution
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
@@ -117,9 +123,13 @@ class CodecCompositeCamera:
         self.current_color_frame = 0
         self.done = False
         self.last_frame_time = time.time()
+        self.remaining_start_frames = self.start_signal_frames
         num_grids = self.encoded_grids.shape[0]
         total_frames = num_grids * self.num_slices * 2
         print(f"\n[CodecCompositeCamera] Starting auto-transmission at {self.fps} FPS ({total_frames} frames)")
+        if self.start_signal_frames > 0:
+            print(f"[CodecCompositeCamera] Showing start signal for {self.start_signal_frames} frame(s) "
+                  f"({self.start_signal_seconds:.2f}s)")
         print(f"[CodecCompositeCamera] Grid 1/{num_grids}, Slice R1/{self.num_row_slices}, C1/{self.num_col_slices}, Frame 0/2")
 
     def render_grid(self):
@@ -148,6 +158,8 @@ class CodecCompositeCamera:
                         x1 = j * self.cell_size
                         x2 = (j + 1) * self.cell_size
                         grid[y1:y2, x1:x2] = color
+        elif self.remaining_start_frames > 0:
+            grid[:] = COLORS_8[2]  # solid green
         elif self.done:
             # Done frame - solid green (indicates transmission complete)
             grid[:] = [0, 255, 0]  # Green
@@ -220,7 +232,12 @@ class CodecCompositeCamera:
             current_time = time.time()
             if current_time - self.last_frame_time >= self.frame_interval:
                 self.last_frame_time = current_time
-                self._advance_frame()
+                if self.remaining_start_frames > 0:
+                    self.remaining_start_frames -= 1
+                    if self.remaining_start_frames == 0:
+                        print("[CodecCompositeCamera] Start signal complete - streaming data")
+                else:
+                    self._advance_frame()
 
         # Always render grid (so it's visible for calibration)
         # Render current grid (already in BGR format)

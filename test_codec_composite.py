@@ -95,6 +95,26 @@ def classify_frame_phase(color_pattern):
     return "upper" if color_pattern.max() <= 1 else "lower"
 
 
+START_SIGNAL_COLOR_INDEX = 2  # Solid green
+
+
+def is_start_signal(color_pattern, min_ratio=0.98):
+    if color_pattern is None:
+        return False
+    total = color_pattern.size
+    if total == 0:
+        return False
+    green = np.count_nonzero(color_pattern == START_SIGNAL_COLOR_INDEX)
+    return green >= total * min_ratio
+
+
+def is_calibration_pattern(color_pattern):
+    if color_pattern is None:
+        return False
+    uniques = np.unique(color_pattern)
+    return np.all(np.isin(uniques, (0, 7)))
+
+
 def main():
     print("\n" + "="*70)
     print(f"CODEC COMPOSITE CAMERA TEST - {TEST_TENSOR_ROWS}x{TEST_TENSOR_COLS} Tensor Transmission")
@@ -148,6 +168,7 @@ def main():
     # Frame change detection
     last_frame_id = None
     last_pattern_hash = None
+    start_signal_done = False
 
     while True:
         ret, frame = cap.read()
@@ -173,6 +194,14 @@ def main():
                     rx.border_ratio,
                 )
                 if color_pattern is not None:
+                    if is_calibration_pattern(color_pattern):
+                        continue
+
+                    if not start_signal_done:
+                        if is_start_signal(color_pattern):
+                            continue
+                        start_signal_done = True
+
                     grid_idx = cap.current_grid_idx
                     row_slice_idx = cap.current_row_slice
                     col_slice_idx = cap.current_col_slice

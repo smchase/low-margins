@@ -209,7 +209,7 @@ class Receiver:
         return rect
 
 
-def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05):
+def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05, brightness_adjust=0):
     """Warp locked region and quantize each cell to the nearest palette color."""
     if locked_corners is None:
         return None
@@ -220,6 +220,10 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05):
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
 
     warped = cv2.warpPerspective(frame, M, (size, size))
+    
+    # Apply brightness adjustment if needed
+    if brightness_adjust != 0:
+        warped = cv2.convertScaleAbs(warped, alpha=1.0, beta=brightness_adjust)
 
     cell_size = size / grid_size
     border = int(cell_size * border_ratio)
@@ -290,8 +294,20 @@ def classify_frame_phase(pattern):
     if total == 0:
         return None
 
-    if pattern.max() <= 1:
+    max_val = pattern.max()
+    unique_vals = np.unique(pattern)
+    
+    # Upper phase should only have values 0 or 1
+    # But due to camera noise, we might see some other values
+    # Check if it's mostly 0s and 1s
+    if max_val <= 1 and len(unique_vals) <= 2:
         return "upper"
+    
+    # Also check if vast majority are 0 or 1 (allowing for some noise)
+    binary_count = np.sum((pattern == 0) | (pattern == 1))
+    if binary_count >= pattern.size * 0.9:  # 90% or more are 0 or 1
+        return "upper"
+        
     return "lower"
 
 
@@ -430,13 +446,26 @@ class CodecTransmitterDisplay:
         else:
             slice_values = self._current_slice_values()
             if self.current_color_frame == 0:
-                color_indices = slice_values & 0x07
+                color_indices = slice_values & 0x07  # Lower 3 bits: values 0-7
             else:
-                color_indices = (slice_values >> 3) & 0x01
+                color_indices = (slice_values >> 3) & 0x01  # Bit 3: values 0-1
+                
+            # Debug: print unique color indices every few frames (only if verbose)
+            if hasattr(self, 'debug_verbose') and self.debug_verbose:
+                if hasattr(self, '_debug_counter'):
+                    self._debug_counter += 1
+                else:
+                    self._debug_counter = 0
+                    
+                if self._debug_counter % 10 == 0:
+                    unique_indices = np.unique(color_indices)
+                    print(f"\n[TX DEBUG] Frame type: {'lower' if self.current_color_frame == 0 else 'upper'}, "
+                          f"unique color indices: {unique_indices}")
 
             for i in range(self.grid_size):
                 for j in range(self.grid_size):
-                    color = COLORS_8[color_indices[i, j]]
+                    color_idx = color_indices[i, j]
+                    color = COLORS_8[color_idx]
                     y1 = i * self.cell_size
                     y2 = (i + 1) * self.cell_size
                     x1 = j * self.cell_size
@@ -454,13 +483,14 @@ class CodecTransmitterDisplay:
         image[border:-border, border:border+frame_width] = [0, 0, 0]
         image[border:-border, -border-frame_width:-border] = [0, 0, 0]
 
+        phase_str = "lower(0-7)" if self.current_color_frame == 0 else "upper(0-1)"
         status = "CALIBRATION" if not self.transmitting else (
             "START SIGNAL" if self.remaining_start_frames > 0 else
             "DONE" if self.done else
             f"G{self.current_grid_idx+1}/{self.encoded_grids.shape[0]} "
             f"R{self.current_row_slice+1}/{self.num_row_slices} "
             f"C{self.current_col_slice+1}/{self.num_col_slices} "
-            f"F{self.current_color_frame}/2"
+            f"Phase: {phase_str}"
         )
         cv2.putText(image, f"TX MODE - {status}",
                     (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
@@ -486,33 +516,95 @@ def load_tensor(args):
     return tensor
 
 
-def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size):
+def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force_alternating=False):
     rows_per_slice, cols_per_slice, num_row_slices, num_col_slices = compute_slice_layout(rows, cols, grid_size)
     expected = codec_obj.grids_needed() * num_row_slices * num_col_slices * 2
     if len(color_frames) < expected:
         raise ValueError(f"Need {expected} frames, captured {len(color_frames)}")
 
+    # Classify frames by phase
+    frame_phases = []
+    for frame in color_frames:
+        phase = classify_frame_phase(frame)
+        frame_phases.append(phase)
+    
+    print(f"[RX] Frame phases: {frame_phases}")
+    
+    # Try to decode assuming frames are in order
     frame_iter = iter(color_frames)
+    frame_idx = 0
     grids = []
     try:
-        for _ in range(codec_obj.grids_needed()):
+        for grid_idx in range(codec_obj.grids_needed()):
             row_bands = []
-            for _ in range(num_row_slices):
+            for row_idx in range(num_row_slices):
                 col_blocks = []
-                for _ in range(num_col_slices):
-                    lower = next(frame_iter)
-                    upper = next(frame_iter)
+                for col_idx in range(num_col_slices):
+                    # Get next two frames - try to get one of each phase
+                    frame1 = next(frame_iter)
+                    phase1 = classify_frame_phase(frame1)
+                    frame2 = next(frame_iter)
+                    phase2 = classify_frame_phase(frame2)
+                    
+                    if force_alternating:
+                        # Force alternating pattern: even frames are lower, odd are upper
+                        lower, upper = frame1, frame2
+                        print(f"[RX] Grid {grid_idx+1}: Forcing alternating pattern (frame1=lower, frame2=upper)")
+                    else:
+                        # For robustness, determine phase by looking at value distribution
+                        # Lower phase should have more diverse values (0-7)
+                        # Upper phase should be mostly 0s and 1s
+                        
+                        unique1 = np.unique(frame1)
+                        unique2 = np.unique(frame2)
+                        
+                        # Count how many cells are 0 or 1 in each frame
+                        binary_ratio1 = np.sum((frame1 == 0) | (frame1 == 1)) / frame1.size
+                        binary_ratio2 = np.sum((frame2 == 0) | (frame2 == 1)) / frame2.size
+                        
+                        # The frame with higher binary ratio is likely the upper phase
+                        if binary_ratio2 > binary_ratio1:
+                            lower, upper = frame1, frame2
+                            print(f"[RX] Grid {grid_idx+1}: frame1 is lower (binary ratio {binary_ratio1:.2f}), "
+                                  f"frame2 is upper (binary ratio {binary_ratio2:.2f})")
+                        else:
+                            lower, upper = frame2, frame1
+                            print(f"[RX] Grid {grid_idx+1}: frame2 is lower (binary ratio {binary_ratio2:.2f}), "
+                                  f"frame1 is upper (binary ratio {binary_ratio1:.2f})")
+                    
                     lower_bits = (lower & 0x07).astype(np.uint8)
                     upper_bit = (upper & 0x01).astype(np.uint8)
                     slice_values = lower_bits | (upper_bit << 3)
                     col_blocks.append(slice_values)
+                    
+                    # Debug: show sample values and unique values in each frame
+                    if grid_idx == 0 and row_idx == 0 and col_idx == 0:  # First slice of first grid
+                        lower_unique = np.unique(lower)
+                        upper_unique = np.unique(upper)
+                        print(f"[RX] Sample decode: lower unique values: {lower_unique}, upper unique values: {upper_unique}")
+                        print(f"[RX] Sample decode: lower[0,0]={lower[0,0]} -> {lower_bits[0,0]}, "
+                              f"upper[0,0]={upper[0,0]} -> {upper_bit[0,0]}, "
+                              f"combined={slice_values[0,0]}")
                 row_bands.append(np.hstack(col_blocks))
             full_grid = np.vstack(row_bands)
             grids.append(full_grid[:rows, :cols])
     except StopIteration as exc:
         raise ValueError("Incomplete frame sequence for decoding") from exc
 
-    return np.stack(grids, axis=0)
+    stacked_grids = np.stack(grids, axis=0)
+    
+    # Debug: show the range of values in the decoded grids
+    print(f"[RX] Decoded grids shape: {stacked_grids.shape}")
+    for i, grid in enumerate(stacked_grids):
+        unique_vals = np.unique(grid)
+        print(f"[RX] Grid {i+1} unique values: {unique_vals}, min={grid.min()}, max={grid.max()}")
+    
+    # Ensure values are within valid range [0, 15]
+    if stacked_grids.max() > 15:
+        print(f"[RX] WARNING: Grid values exceed 15 (max={stacked_grids.max()}), clamping to valid range")
+        stacked_grids = np.clip(stacked_grids, 0, 15)
+    
+    return stacked_grids
 
 
 def run_tx(args):
@@ -558,6 +650,9 @@ def run_rx(args):
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    
+    # Set buffer size to 1 to reduce latency
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     rx = Receiver(grid_size=args.grid_size)
     c = codec(args.rows, args.cols, min_val=0, max_val=15)
@@ -576,6 +671,8 @@ def run_rx(args):
     capture_stability = max(1, args.capture_stability)
     capture_timeout = max(0.0, args.capture_timeout)
     expected_phase = "lower"
+    last_capture_time = 0  # Track when we last captured a frame
+    min_capture_interval = args.capture_interval  # Minimum seconds between captures
 
     print("\n" + "=" * 70)
     print("RX MODE - CODEC VISUAL LINK")
@@ -592,11 +689,34 @@ def run_rx(args):
     print("=" * 70)
     print(f"Capture threshold: {capture_threshold*100:.1f}% change, "
           f"tolerance {capture_tolerance*100:.1f}%, stability {capture_stability} frame(s)")
+    print(f"Capture interval: {min_capture_interval:.1f}s minimum between frames")
 
+    # Add frame counter for debugging
+    frame_count = 0
+    last_fps_time = time.time()
+    fps_frame_count = 0
+    current_fps = 0
+    
     while True:
-        ret, frame = cap.read()
+        # Flush camera buffer - grab multiple frames and use only the last one
+        # This helps ensure we get the most recent frame
+        for _ in range(2):
+            ret, frame = cap.read()
+            if not ret:
+                break
+        
         if not ret:
             break
+            
+        frame_count += 1
+        fps_frame_count += 1
+        
+        # Calculate FPS every second
+        now = time.time()
+        if now - last_fps_time >= 1.0:
+            current_fps = fps_frame_count / (now - last_fps_time)
+            fps_frame_count = 0
+            last_fps_time = now
 
         display = frame.copy()
         status_text = "NOT CALIBRATED - Press 'c'"
@@ -623,17 +743,25 @@ def run_rx(args):
                 min_changed = max(1, int(total_cells * capture_threshold))
                 tolerance_cells = max(1, int(total_cells * capture_tolerance))
                 diff_last = total_cells if last_pattern is None else count_changed_cells(pattern, last_pattern)
+                
+                # For debugging, let's capture all frames with any significant change
+                if args.debug_capture_all:
+                    min_changed = max(1, int(total_cells * 0.01))  # Only 1% change needed
+                elif phase == "upper":
+                    min_changed = max(1, int(total_cells * 0.05))  # Only 5% change needed for upper frames
+                
                 if diff_last < min_changed:
                     continue
 
                 now = time.time()
 
-                if phase != expected_phase:
-                    phase_seen_time = None
-                    pending_pattern = None
-                    pending_phase = None
-                    pending_consistency = 0
-                    continue
+                # We detected significant change, so this is likely a new frame
+                # Only print debug for phase changes or unusual patterns when requested
+                if args.debug_capture_all:
+                    unique_vals = np.unique(pattern)
+                    if phase == "upper" or len(unique_vals) > 4 or frame_count % 30 == 0:
+                        print(f"\n[RX DEBUG] Phase: {phase}, unique values: {unique_vals}, "
+                              f"max={pattern.max()}, diff={diff_last}/{total_cells}")
 
                 if phase_seen_time is None:
                     phase_seen_time = now
@@ -661,26 +789,59 @@ def run_rx(args):
                 )
 
                 if stable_enough or timeout_elapsed:
+                    # Check if enough time has passed since last capture
+                    time_since_last = now - last_capture_time if last_capture_time > 0 else min_capture_interval
+                    if time_since_last < min_capture_interval:
+                        # Too soon, keep accumulating stability
+                        continue
+                        
                     last_pattern = pending_pattern.copy()
                     captured_frames.append(last_pattern.copy())
                     pending_pattern = None
                     pending_phase = None
                     pending_consistency = 0
                     phase_seen_time = None
+                    last_capture_time = now  # Update last capture time
                     total_captured = len(captured_frames)
-                    print(f"\r[RX] Captured frame {total_captured}/{total_frames_needed} "
-                          f"(phase {phase}, diff vs last {diff_last})", end='', flush=True)
-
-                    expected_phase = "upper" if expected_phase == "lower" else "lower"
+                    print(f"\n[RX] Captured frame {total_captured}/{total_frames_needed} "
+                          f"(phase {phase}, diff vs last {diff_last}, interval {time_since_last:.2f}s)")
+                    
+                    # Don't enforce strict phase alternation - just track what we captured
 
                     if total_captured >= total_frames_needed:
                         print("\n[RX] Frames collected - decoding...")
                         try:
-                            grids = decode_captured_frames(captured_frames, c, args.rows, args.cols, args.grid_size)
+                            grids = decode_captured_frames(captured_frames, c, args.rows, args.cols, args.grid_size, 
+                                                          force_alternating=args.force_alternating)
                             decoded_tensor = c.decode(grids)
+                            
+                            # Check for NaN values
+                            nan_count = np.isnan(decoded_tensor).sum()
+                            if nan_count > 0:
+                                print(f"[RX] ⚠️  Warning: Decoded tensor contains {nan_count} NaN values!")
+                                # Find which grids might be problematic
+                                for i, grid in enumerate(grids):
+                                    unique_vals = np.unique(grid)
+                                    expected = set(range(16))
+                                    missing = expected - set(unique_vals)
+                                    if missing:
+                                        print(f"[RX] Grid {i+1} is missing values: {sorted(missing)}")
+                                        if 0 in missing:
+                                            print("[RX] Tip: Missing value 0 (black) - try increasing border with '+' key")
+                                        if 7 in missing:
+                                            print("[RX] Tip: Missing value 7 (white) - might be clipping, try decreasing border with '-' key")
+                        else:
                             print("[RX] ✓ Decode complete!")
+                            
                             print(f"[RX] Decoded tensor: {decoded_tensor.shape}, dtype={decoded_tensor.dtype}")
                             print(f"[RX] Sample row: {decoded_tensor[0, :5]}")
+                            
+                            # Show statistics
+                            valid_values = decoded_tensor[~np.isnan(decoded_tensor)]
+                            if len(valid_values) > 0:
+                                print(f"[RX] Valid values: min={valid_values.min():.3f}, "
+                                      f"max={valid_values.max():.3f}, mean={valid_values.mean():.3f}")
+                            
                             if args.save_decoded:
                                 np.save(args.save_decoded, decoded_tensor)
                                 print(f"[RX] Saved tensor to {args.save_decoded}")
@@ -703,6 +864,11 @@ def run_rx(args):
             cv2.putText(display, info, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
         cv2.putText(display, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+        
+        # Show FPS and frame count
+        fps_text = f"FPS: {current_fps:.1f} | Frame: {frame_count}"
+        cv2.putText(display, fps_text, (10, display.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
         cv2.imshow("Codec RX", display)
 
         if rx.debug_gray is not None:
@@ -725,6 +891,7 @@ def run_rx(args):
                 pending_phase = None
                 phase_seen_time = None
                 expected_phase = "lower"
+                last_capture_time = 0  # Reset capture timing
                 print("\n[RX] Calibration reset")
             else:
                 if rx.calibrate(frame):
@@ -743,6 +910,7 @@ def run_rx(args):
                 pending_phase = None
                 phase_seen_time = None
                 expected_phase = "lower"
+                last_capture_time = 0  # Reset capture timing
                 print("\n[RX] Capture started - waiting for frames...")
         elif key == ord('r'):
             captured_frames.clear()
@@ -752,6 +920,7 @@ def run_rx(args):
             pending_phase = None
             phase_seen_time = None
             expected_phase = "lower"
+            last_capture_time = 0  # Reset capture timing
             capture_active = False
             print("\n[RX] Captured frames cleared")
         elif key == ord('f'):
@@ -789,6 +958,12 @@ def build_arg_parser():
                         help='Number of consecutive stable samples before recording a frame (RX)')
     parser.add_argument('--capture-timeout', type=float, default=0.4,
                         help='Seconds to wait before accepting latest sample even if stability not reached (RX)')
+    parser.add_argument('--debug-capture-all', action='store_true',
+                        help='Capture all frames for debugging (ignores change threshold)')
+    parser.add_argument('--force-alternating', action='store_true',
+                        help='Force alternating lower/upper phase decoding (RX)')
+    parser.add_argument('--capture-interval', type=float, default=0.3,
+                        help='Minimum seconds between frame captures (RX)')
     return parser
 
 
