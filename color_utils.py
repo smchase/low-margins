@@ -4,25 +4,43 @@ Color handling and detection utilities
 
 import numpy as np
 import cv2
-from config import COLOR_PALETTE, GRID_SIZE
+from config import (
+    COLOR_PALETTE,
+    GRID_SIZE,
+    FRAME_SIZE,
+    ACTIVE_CELL_COUNT,
+    REFERENCE_MARKERS,
+)
+
+# Precompute reference cell lookups
+REFERENCE_INDEX_MAP = {}
+REFERENCE_INDEX_SET = set()
+for marker in REFERENCE_MARKERS:
+    row, col = marker["position"]
+    flat_idx = row * GRID_SIZE + col
+    REFERENCE_INDEX_MAP[flat_idx] = marker["color"]
+    REFERENCE_INDEX_SET.add(flat_idx)
 
 
 class ColorDetector:
-    """Detects which of 16 colors a pixel belongs to"""
+    """Detects which color a pixel belongs to from the palette"""
 
     def __init__(self):
-        self.colors = np.array([COLOR_PALETTE[i] for i in range(16)], dtype=np.float32)
+        num_colors = len(COLOR_PALETTE)
+        self.base_colors = np.array([COLOR_PALETTE[i] for i in range(num_colors)], dtype=np.float32)
+        self.channel_scale = np.ones(3, dtype=np.float32)
+        self.colors = self.base_colors.copy()
 
     def detect_color(self, pixel):
         """
-        Determine which of 16 colors the pixel is closest to.
+        Determine which color the pixel is closest to.
         Uses Euclidean distance in BGR space.
 
         Args:
             pixel: (B, G, R) tuple
 
         Returns:
-            color_index (0-15)
+            color_index (0 to num_colors-1)
         """
         pixel = np.array(pixel, dtype=np.float32)
         distances = np.sqrt(np.sum((self.colors - pixel) ** 2, axis=1))
@@ -36,14 +54,15 @@ class ColorDetector:
             image_region: shape (H, W, 3) BGR image
 
         Returns:
-            color_indices: shape (H, W) with values 0-15
+            color_indices: shape (H, W) with color values from palette
         """
         # Reshape to (H*W, 3)
         h, w, c = image_region.shape
         pixels = image_region.reshape(-1, 3).astype(np.float32)
 
-        # Compute distances to all 16 colors
-        distances = np.zeros((pixels.shape[0], 16), dtype=np.float32)
+        # Compute distances to all colors in palette
+        num_colors = len(self.colors)
+        distances = np.zeros((pixels.shape[0], num_colors), dtype=np.float32)
         for i, color in enumerate(self.colors):
             distances[:, i] = np.sqrt(np.sum((pixels - color) ** 2, axis=1))
 
@@ -76,6 +95,23 @@ class ColorDetector:
         color_indices = np.argmin(distances, axis=1)
         return color_indices.reshape(image_region.shape[0], image_region.shape[1])
 
+    def apply_channel_scale(self, scale):
+        """
+        Update palette colors by applying per-channel scale factors (B, G, R).
+        """
+        scale = np.asarray(scale, dtype=np.float32)
+        if scale.shape != (3,):
+            raise ValueError("Scale must be length 3 for B,G,R channels")
+        # Clamp scale to avoid wild values
+        scale = np.clip(scale, 0.2, 5.0)
+        self.channel_scale = scale
+        self.colors = np.clip(self.base_colors * scale, 0, 255).astype(np.float32)
+
+    def reset_scale(self):
+        """Reset palette to original values."""
+        self.channel_scale = np.ones(3, dtype=np.float32)
+        self.colors = self.base_colors.copy()
+
 
 def draw_grid(image, grid_data, cell_width, cell_height):
     """
@@ -102,46 +138,53 @@ def draw_grid(image, grid_data, cell_width, cell_height):
 
 def grid_to_bytes(grid_data):
     """
-    Convert 128x128 grid (values 0-15) to 8192 bytes.
-    Each byte stores 2 cells (4 bits each).
-
-    Args:
-        grid_data: (128, 128) array with values 0-15
-
-    Returns:
-        bytes of length 8192
+    Convert grid (values 0-15) to payload bytes, skipping reserved reference cells.
     """
     flat = grid_data.flatten()
-    result = bytearray()
+    nibbles = []
 
-    for i in range(0, len(flat), 2):
-        high_nibble = flat[i] & 0x0F
-        low_nibble = flat[i + 1] & 0x0F
-        byte = (high_nibble << 4) | low_nibble
-        result.append(byte)
+    for idx, value in enumerate(flat):
+        if idx in REFERENCE_INDEX_SET:
+            continue
+        nibbles.append(int(value) & 0x0F)
+
+    if len(nibbles) != ACTIVE_CELL_COUNT:
+        raise ValueError("Grid payload size mismatch")
+
+    result = bytearray()
+    for i in range(0, len(nibbles), 2):
+        high_nibble = nibbles[i] & 0x0F
+        low_nibble = nibbles[i + 1] & 0x0F
+        result.append((high_nibble << 4) | low_nibble)
 
     return bytes(result)
 
 
 def bytes_to_grid(data):
     """
-    Convert 8192 bytes back to 128x128 grid.
-
-    Args:
-        data: bytes of length 8192
-
-    Returns:
-        (128, 128) array with values 0-15
+    Convert payload bytes back to grid, inserting reference markers.
     """
-    flat = []
+    if len(data) != FRAME_SIZE:
+        raise ValueError(f"Expected {FRAME_SIZE} bytes, got {len(data)}")
 
+    nibbles = []
     for byte in data:
-        high_nibble = (byte >> 4) & 0x0F
-        low_nibble = byte & 0x0F
-        flat.append(high_nibble)
-        flat.append(low_nibble)
+        nibbles.append((byte >> 4) & 0x0F)
+        nibbles.append(byte & 0x0F)
 
-    return np.array(flat, dtype=np.uint8).reshape(GRID_SIZE, GRID_SIZE)
+    if len(nibbles) != ACTIVE_CELL_COUNT:
+        raise ValueError("Payload size does not match active cell count")
+
+    flat = np.zeros(GRID_SIZE * GRID_SIZE, dtype=np.uint8)
+    nibble_idx = 0
+    for idx in range(GRID_SIZE * GRID_SIZE):
+        if idx in REFERENCE_INDEX_SET:
+            flat[idx] = REFERENCE_INDEX_MAP[idx]
+        else:
+            flat[idx] = nibbles[nibble_idx]
+            nibble_idx += 1
+
+    return flat.reshape(GRID_SIZE, GRID_SIZE)
 
 
 if __name__ == "__main__":

@@ -6,22 +6,25 @@ import cv2
 import numpy as np
 import threading
 import time
-import base64
 from flask import Flask, request, jsonify, render_template_string
 from encoder import MessageEncoder
 from color_utils import draw_grid, COLOR_PALETTE
 from config import (
     GRID_SIZE, DISPLAY_WIDTH, DISPLAY_HEIGHT, CELL_WIDTH, CELL_HEIGHT,
-    TARGET_FPS, FRAME_TIME_MS, SERVER_HOST, SERVER_PORT
+    TARGET_FPS, FRAME_TIME_MS, SERVER_HOST, SERVER_PORT, GRID_BORDER_THICKNESS,
+    GRID_BORDER_COLOR
 )
 
 
 class TransmitterApp:
-    def __init__(self):
+    def __init__(self, test_message="HELLO TEST"):
         self.encoder = MessageEncoder()
         self.running = True
         self.current_grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.uint8)
         self.lock = threading.Lock()
+
+        # For simple test mode: queue the test message once
+        self.encoder.queue_message(test_message)
 
         # Flask app
         self.flask_app = Flask(__name__)
@@ -33,6 +36,14 @@ class TransmitterApp:
         @self.flask_app.route('/')
         def index():
             """Serve web UI"""
+            import json
+
+            def bgr_to_hex(bgr):
+                b, g, r = bgr
+                return f"#{r:02X}{g:02X}{b:02X}"
+
+            color_map = {idx: bgr_to_hex(color) for idx, color in COLOR_PALETTE.items()}
+
             html = '''
             <!DOCTYPE html>
             <html>
@@ -40,59 +51,87 @@ class TransmitterApp:
                 <title>NO-MARGIN-VIS Transmitter</title>
                 <style>
                     * { margin: 0; padding: 0; box-sizing: border-box; }
-                    body { font-family: monospace; background: #000; color: #0f0; overflow: hidden; }
-                    #container { display: flex; flex-direction: column; height: 100vh; }
+                    html, body { height: 100%; width: 100%; }
+                    body { font-family: monospace; background: #fff; color: #000; overflow: hidden; }
+                    #container { display: flex; flex-direction: column; height: 100%; width: 100%; }
                     #grid {
                         flex: 1;
-                        display: flex;
-                        flex-wrap: wrap;
-                        align-content: flex-start;
-                        border: 2px solid #0f0;
-                        background: #000;
+                        min-height: 0;
+                        aspect-ratio: 1;
+                        width: 100%;
+                        max-width: 100%;
+                        max-height: 100%;
+                        display: grid;
+                        border: 32px solid #0f0;
+                        background: #fff;
+                        overflow: visible;
+                        gap: 0;
+                        margin: auto;
+                        box-shadow: 0 0 0 4px #0f0, inset 0 0 0 4px #0f0;
+                        position: relative;
                     }
                     .cell {
-                        flex-grow: 1;
-                        flex-basis: calc(100% / 64);
-                        aspect-ratio: 1;
-                        background: #000;
+                        background: #fff;
+                        border: 0;
                     }
+                    .corner-marker {
+                        position: absolute;
+                        width: 30px;
+                        height: 30px;
+                        background: #000;
+                        z-index: 10;
+                    }
+                    .corner-marker.top-left { top: -15px; left: -15px; }
+                    .corner-marker.top-right { top: -15px; right: -15px; }
+                    .corner-marker.bottom-left { bottom: -15px; left: -15px; }
+                    .corner-marker.bottom-right { bottom: -15px; right: -15px; }
                     #controls {
-                        background: #111;
-                        padding: 15px;
-                        border-top: 2px solid #0f0;
+                        flex-shrink: 0;
+                        background: #fff;
+                        padding: 10px;
+                        border-top: 4px solid #0f0;
                         display: flex;
                         gap: 10px;
                         align-items: center;
+                        height: auto;
                     }
                     #stats {
-                        color: #0f0;
-                        font-size: 14px;
-                        min-width: 300px;
+                        color: #000;
+                        font-size: 12px;
+                        min-width: 250px;
+                        white-space: nowrap;
                     }
                     #message-input {
                         flex: 1;
-                        padding: 10px;
-                        font-size: 16px;
+                        padding: 8px;
+                        font-size: 14px;
                         font-family: monospace;
-                        background: #000;
-                        color: #0f0;
-                        border: 1px solid #0f0;
+                        background: #fff;
+                        color: #000;
+                        border: 1px solid #999;
+                        min-width: 200px;
                     }
                     button {
-                        padding: 10px 20px;
-                        font-size: 16px;
+                        padding: 8px 15px;
+                        font-size: 14px;
                         cursor: pointer;
                         background: #0f0;
                         color: #000;
                         border: none;
                         font-weight: bold;
+                        flex-shrink: 0;
                     }
-                    button:hover { background: #00ff00aa; }
+                    button:hover { background: #00dd00; }
                 </style>
             </head>
             <body>
                 <div id="container">
-                    <div id="grid"></div>
+                    <div id="grid">
+                        <div class="corner-marker top-left"></div>
+                        <div class="corner-marker top-right"></div>
+                        <div class="corner-marker bottom-left"></div>
+                        <div class="corner-marker bottom-right"></div>
+                    </div>
                     <div id="controls">
                         <div id="stats">Frames: 0 | Queue: 0</div>
                         <input id="message-input" type="text" placeholder="Enter message...">
@@ -100,21 +139,26 @@ class TransmitterApp:
                     </div>
                 </div>
                 <script>
-                    const GRID_SIZE = 64;
-                    const COLOR_MAP = {
-                        0: '#000000', 1: '#FF0000', 2: '#00FF00', 3: '#0000FF',
-                        4: '#00FFFF', 5: '#FF00FF', 6: '#FFFF00', 7: '#FFFFFF',
-                        8: '#800000', 9: '#008000', 10: '#000080', 11: '#FFA500',
-                        12: '#800080', 13: '#FFC0CB', 14: '#00FF7F', 15: '#008080'
-                    };
+                    let GRID_SIZE = 0;  // Will be set dynamically
+                    const COLOR_MAP = __COLOR_MAP__;
 
-                    function createGrid() {
+                    function createGrid(gridSize) {
                         const gridDiv = document.getElementById('grid');
-                        for (let i = 0; i < GRID_SIZE * GRID_SIZE; i++) {
+                        // Remove only cells, keep corner markers
+                        const cells = gridDiv.querySelectorAll('.cell');
+                        cells.forEach(cell => cell.remove());
+
+                        GRID_SIZE = gridSize;
+
+                        // Update CSS grid to match actual size
+                        gridDiv.style.gridTemplateColumns = `repeat(${gridSize}, 1fr)`;
+                        gridDiv.style.gridTemplateRows = `repeat(${gridSize}, 1fr)`;
+
+                        for (let i = 0; i < gridSize * gridSize; i++) {
                             const cell = document.createElement('div');
                             cell.className = 'cell';
                             cell.id = 'cell-' + i;
-                            cell.style.backgroundColor = '#000000';
+                            cell.style.backgroundColor = '#FFFFFF';
                             gridDiv.appendChild(cell);
                         }
                     }
@@ -123,12 +167,23 @@ class TransmitterApp:
                         fetch('/grid')
                             .then(r => r.json())
                             .then(data => {
+                                // Initialize grid on first update if not done
+                                if (GRID_SIZE === 0) {
+                                    const gridSize = Math.sqrt(data.grid.length);
+                                    createGrid(gridSize);
+                                }
+
+                                // Update grid colors
                                 for (let i = 0; i < data.grid.length; i++) {
                                     const colorIdx = data.grid[i];
-                                    document.getElementById('cell-' + i).style.backgroundColor = COLOR_MAP[colorIdx];
+                                    const cell = document.getElementById('cell-' + i);
+                                    if (cell) {
+                                        cell.style.backgroundColor = COLOR_MAP[colorIdx];
+                                    }
                                 }
+
                                 document.getElementById('stats').innerHTML =
-                                    'Frames: ' + data.frames + ' | Queue: ' + data.queue + ' | FPS: ' + (data.fps || 20).toFixed(1);
+                                    'Frames: ' + data.frames + ' | Queue: ' + data.queue;
                             });
                     }
 
@@ -151,12 +206,12 @@ class TransmitterApp:
                         if (e.key === 'Enter') sendMessage();
                     });
 
-                    createGrid();
                     setInterval(updateGrid, 50);
                 </script>
             </body>
             </html>
             '''
+            html = html.replace('__COLOR_MAP__', json.dumps(color_map))
             return render_template_string(html)
 
         @self.flask_app.route('/grid')
@@ -166,7 +221,7 @@ class TransmitterApp:
                 grid_flat = self.current_grid.flatten().tolist()
                 return jsonify({
                     'grid': grid_flat,
-                    'frames': self.encoder.frame_counter,
+                    'frames': self.encoder.global_frame_counter,
                     'queue': len(self.encoder.message_queue),
                     'fps': TARGET_FPS
                 })
@@ -191,7 +246,7 @@ class TransmitterApp:
         def status():
             with self.lock:
                 return jsonify({
-                    'frame_counter': self.encoder.frame_counter,
+                    'frame_counter': self.encoder.global_frame_counter,
                     'queue_size': len(self.encoder.message_queue),
                     'running': self.running
                 })
@@ -201,9 +256,9 @@ class TransmitterApp:
             self.running = False
             return jsonify({'status': 'stopping'})
 
-    def display_thread(self):
-        """Thread that generates and displays frames at 20fps"""
-        print(f"Display thread started - {DISPLAY_WIDTH}x{DISPLAY_HEIGHT} @ {TARGET_FPS}fps")
+    def display_loop(self):
+        """Generate and display frames at 20fps (runs on main thread)."""
+        print(f"Display loop started - {DISPLAY_WIDTH}x{DISPLAY_HEIGHT} @ {TARGET_FPS}fps")
 
         # Try to create display window, but continue if display unavailable
         window_name = "NO-MARGIN-VIS Transmitter"
@@ -214,10 +269,9 @@ class TransmitterApp:
             cv2.resizeWindow(window_name, DISPLAY_WIDTH, DISPLAY_HEIGHT)
             cv2.moveWindow(window_name, 0, 0)
             display_available = True
-            print("Display window created successfully")
-        except cv2.error as e:
-            print(f"WARNING: Display not available - running in headless mode")
-            print(f"  (This is normal on headless/remote systems)")
+            print("✓ Display window created successfully")
+        except Exception as e:
+            print(f"⚠ Display not available: {type(e).__name__}: {e}")
             print(f"  Grid frames are still being generated at {TARGET_FPS}fps")
             print(f"  Connect via HTTP to send/receive messages")
 
@@ -235,10 +289,17 @@ class TransmitterApp:
                 # Create display image
                 display_image = np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
                 draw_grid(display_image, self.current_grid, CELL_WIDTH, CELL_HEIGHT)
+                cv2.rectangle(
+                    display_image,
+                    (GRID_BORDER_THICKNESS // 2, GRID_BORDER_THICKNESS // 2),
+                    (DISPLAY_WIDTH - GRID_BORDER_THICKNESS // 2 - 1, DISPLAY_HEIGHT - GRID_BORDER_THICKNESS // 2 - 1),
+                    GRID_BORDER_COLOR,
+                    GRID_BORDER_THICKNESS
+                )
 
                 # Add frame counter overlay
                 with self.lock:
-                    frame_num = self.encoder.frame_counter
+                    frame_num = self.encoder.global_frame_counter
                 cv2.putText(
                     display_image,
                     f"Frame: {frame_num}",
@@ -256,7 +317,7 @@ class TransmitterApp:
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord('q'):
                         self.running = False
-                except cv2.error:
+                except Exception:
                     # Display was lost (e.g., window closed)
                     display_available = False
 
@@ -268,20 +329,29 @@ class TransmitterApp:
         if display_available:
             cv2.destroyAllWindows()
 
+    def _run_server(self, debug):
+        """Run Flask server in a background thread."""
+        try:
+            self.flask_app.run(host=SERVER_HOST, port=SERVER_PORT, debug=debug, threaded=True)
+        except Exception as exc:
+            print(f"Flask server stopped: {exc}")
+
     def start(self, debug=False):
         """Start transmitter"""
         print(f"Starting transmitter on {SERVER_HOST}:{SERVER_PORT}")
 
-        # Start display thread
-        display_t = threading.Thread(target=self.display_thread, daemon=True)
-        display_t.start()
+        server_thread = threading.Thread(
+            target=self._run_server, args=(debug,), daemon=True, name="TransmitterHTTP"
+        )
+        server_thread.start()
 
-        # Start Flask server
         try:
-            self.flask_app.run(host=SERVER_HOST, port=SERVER_PORT, debug=debug, threaded=True)
+            self.display_loop()
         except KeyboardInterrupt:
+            print("Interrupted, shutting down transmitter...")
+        finally:
             self.running = False
-            display_t.join(timeout=2)
+            server_thread.join(timeout=1)
 
 
 if __name__ == "__main__":

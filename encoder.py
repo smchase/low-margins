@@ -12,11 +12,13 @@ class MessageEncoder:
     """Converts text messages into a stream of grid frames"""
 
     def __init__(self):
-        self.frame_counter = 0
+        self.global_frame_counter = 0  # Global counter for stats
+        self.message_frame_counter = 0  # Reset per message for consistent encoding
         self.message_queue = []
         self.current_message_id = 0
         self.current_message = None
         self.current_message_offset = 0
+        self.last_message_frame = None  # Keep last frame on screen after transmission
 
     def queue_message(self, text):
         """
@@ -30,28 +32,41 @@ class MessageEncoder:
         self.message_queue.append(message_bytes)
         print(f"Queued message: {len(message_bytes)} bytes")
 
+        # Update message ID based on content hash for consistent encoding
+        # Same message content = same message ID = same visual pattern
+        import hashlib
+        content_hash = int(hashlib.md5(message_bytes).hexdigest()[:4], 16) & 0xFFFF
+        self.current_message_id = content_hash
+
     def create_frame(self):
         """
         Generate the next frame to display.
 
         Returns:
-            numpy array (128, 128) with values 0-15
+            numpy array (GRID_SIZE, GRID_SIZE) with values 0-7
         """
         # Get next message if not currently sending one
         if self.current_message is None:
             if self.message_queue:
                 self.current_message = self.message_queue.pop(0)
                 self.current_message_offset = 0
+                self.message_frame_counter = 0  # Reset frame counter for this message
                 print(f"Starting transmission of message (ID: {self.current_message_id}, {len(self.current_message)} bytes)")
             else:
-                # No message: display idle pattern
-                return self._create_idle_pattern(self.frame_counter)
+                # No message: return last message frame if available, otherwise idle pattern
+                if self.last_message_frame is not None:
+                    self.global_frame_counter += 1
+                    return self.last_message_frame
+                else:
+                    self.global_frame_counter += 1
+                    return self._create_idle_pattern(self.global_frame_counter)
 
         # Build frame payload
         payload = bytearray()
 
         # Header: frame counter (4 bytes) + message id (2 bytes) + message length (2 bytes)
-        payload.extend(struct.pack('>I', self.frame_counter))  # Frame counter
+        # Use message_frame_counter so same message always has same encoding
+        payload.extend(struct.pack('>I', self.message_frame_counter))  # Frame counter (per message)
         payload.extend(struct.pack('>H', self.current_message_id))  # Message ID
         payload.extend(struct.pack('>H', len(self.current_message)))  # Total message length
 
@@ -69,7 +84,6 @@ class MessageEncoder:
             if self.current_message_offset >= len(self.current_message):
                 print(f"Message (ID: {self.current_message_id}) transmission complete")
                 self.current_message = None
-                self.current_message_id += 1
 
         # Pad payload to FRAME_SIZE with zeros
         while len(payload) < FRAME_SIZE:
@@ -79,7 +93,11 @@ class MessageEncoder:
         payload = bytes(payload[:FRAME_SIZE])
         frame = bytes_to_grid(payload)
 
-        self.frame_counter += 1
+        # Store this frame so it stays on screen after transmission completes
+        self.last_message_frame = frame
+
+        self.message_frame_counter += 1
+        self.global_frame_counter += 1
         return frame
 
     def _create_idle_pattern(self, frame_num):
