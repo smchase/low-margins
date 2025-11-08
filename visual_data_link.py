@@ -120,6 +120,10 @@ class Receiver:
         self.locked_corners = None
         self.warp_matrix = None
         self.warp_size = 600
+        self.debug_warped = None  # Store warped image for debugging
+        self.debug_gray = None  # Store grayscale for debugging
+        self.border_ratio = 0.0  # No border - calibration locks to outer edge
+        self.flip_horizontal = False  # Toggle for horizontal flip
 
     def calibrate(self, frame):
         """Detect and lock onto the grid"""
@@ -183,21 +187,33 @@ class Receiver:
         # Apply perspective transform
         warped = cv2.warpPerspective(frame, self.warp_matrix, (self.warp_size, self.warp_size))
 
-        # Convert to grayscale and threshold
+        # Convert to grayscale
         gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        binary = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 15, 5
-        )
+
+        # Store grayscale for debugging
+        self.debug_gray = gray.copy()
+
+        # Use simple binary threshold (not adaptive) to preserve solid regions
+        # Threshold at 127: values > 127 become white (255), values < 127 become black (0)
+        _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+
+        # Create debug visualization showing the binary image
+        debug_img = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
 
         # Read grid (accounting for border)
-        border_ratio = 0.13
-        grid_start = int(self.warp_size * border_ratio)
-        grid_end = int(self.warp_size * (1 - border_ratio))
+        grid_start = int(self.warp_size * self.border_ratio)
+        grid_end = int(self.warp_size * (1 - self.border_ratio))
         grid_size_px = grid_end - grid_start
+
+        # Draw the grid region boundary
+        cv2.rectangle(debug_img, (grid_start, grid_start), (grid_end, grid_end), (255, 0, 0), 2)
 
         pattern = np.zeros((self.grid_size, self.grid_size), dtype=np.uint8)
         cell_size = grid_size_px / self.grid_size
+
+        # Sample stats for debugging
+        white_count = 0
+        black_count = 0
 
         for i in range(self.grid_size):
             for j in range(self.grid_size):
@@ -214,15 +230,32 @@ class Receiver:
                 white_ratio = np.sum(region == 255) / region.size
                 pattern[i, j] = 1 if white_ratio > 0.5 else 0
 
+                if pattern[i, j] == 1:
+                    white_count += 1
+                else:
+                    black_count += 1
+
+                # Draw sample region
+                color = (0, 255, 0) if pattern[i, j] == 1 else (255, 0, 0)
+                cv2.rectangle(debug_img, (x1, y1), (x2, y2), color, 1)
+
+        # Store debug image
+        self.debug_warped = debug_img
+
+        # Debug print
+        total_cells = self.grid_size * self.grid_size
+        print(f"\rRead: {white_count} white, {black_count} black (total {total_cells}) | Border: {self.border_ratio:.3f} ({int(self.warp_size * self.border_ratio)}px)", end='', flush=True)
+
         return pattern
 
     def decode(self, pattern):
-        """Decode pattern to message - with horizontal flip for facing cameras"""
+        """Decode pattern to message"""
         if pattern is None:
             return None
 
-        # FLIP HORIZONTALLY - cameras are facing each other!
-        pattern = np.fliplr(pattern)
+        # Flip horizontally if enabled (for facing cameras)
+        if self.flip_horizontal:
+            pattern = np.fliplr(pattern)
 
         # Convert to bytes
         total_bits = self.grid_size * self.grid_size
@@ -298,8 +331,11 @@ def main():
 
     else:  # rx mode
         print("Receiver Controls:")
-        print("  c - Calibrate (lock onto grid)")
-        print("  q - Quit")
+        print("  c   - Calibrate (lock onto grid)")
+        print("  f   - Toggle horizontal flip")
+        print("  +/= - Increase border offset")
+        print("  -   - Decrease border offset")
+        print("  q   - Quit")
         print()
 
         cap = cv2.VideoCapture(0)
@@ -372,6 +408,12 @@ def main():
 
             cv2.imshow('RX', display)
 
+            # Show debug windows
+            if rx.debug_gray is not None:
+                cv2.imshow('Debug: Grayscale', rx.debug_gray)
+            if rx.debug_warped is not None:
+                cv2.imshow('Debug: Binary + Grid', rx.debug_warped)
+
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
@@ -385,6 +427,15 @@ def main():
                         print("✓ Locked! TX can now stop flashing.")
                     else:
                         print("✗ Failed. Make sure TX is flashing.")
+            elif key == ord('f'):
+                rx.flip_horizontal = not rx.flip_horizontal
+                print(f"\n✓ Flip horizontal: {'ON' if rx.flip_horizontal else 'OFF'}")
+            elif key == ord('+') or key == ord('='):
+                rx.border_ratio += 0.01
+                print(f"\n✓ Border: {rx.border_ratio:.3f} ({int(rx.warp_size * rx.border_ratio)}px)")
+            elif key == ord('-') or key == ord('_'):
+                rx.border_ratio = max(0.0, rx.border_ratio - 0.01)
+                print(f"\n✓ Border: {rx.border_ratio:.3f} ({int(rx.warp_size * rx.border_ratio)}px)")
 
         cap.release()
 
