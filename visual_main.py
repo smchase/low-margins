@@ -261,6 +261,25 @@ def is_calibration_pattern(color_indices):
     return np.all(np.isin(uniques, (0, 7)))
 
 
+START_SIGNAL_COLOR_INDEX = 2  # Green in COLORS_8 palette
+
+
+def is_start_signal(color_indices, min_ratio=0.95):
+    if color_indices is None:
+        return False
+    total = color_indices.size
+    if total == 0:
+        return False
+    count = np.count_nonzero(color_indices == START_SIGNAL_COLOR_INDEX)
+    return count >= total * min_ratio
+
+
+def count_changed_cells(a, b):
+    if a is None or b is None:
+        return 0
+    return int(np.count_nonzero(a != b))
+
+
 def compute_slice_layout(rows, cols, grid_size):
     rows_per_slice = grid_size
     cols_per_slice = grid_size
@@ -272,7 +291,7 @@ def compute_slice_layout(rows, cols, grid_size):
 class CodecTransmitterDisplay:
     """Full-screen transmitter that cycles codec grids using 8-color encoding."""
 
-    def __init__(self, tensor, grid_size, fps):
+    def __init__(self, tensor, grid_size, fps, start_signal_seconds=1.0):
         self.tensor = tensor
         self.grid_size = grid_size
         self.fps = max(fps, 1e-6)
@@ -290,6 +309,12 @@ class CodecTransmitterDisplay:
         self.cell_size = 24
         self.border = 40
         self.frame_interval = 1.0 / self.fps
+        self.start_signal_seconds = max(0.0, start_signal_seconds)
+        if self.start_signal_seconds <= 0:
+            self.start_signal_frames = 0
+        else:
+            self.start_signal_frames = max(1, int(round(self.start_signal_seconds * self.fps)))
+        self.remaining_start_frames = 0
 
         self.reset_state()
 
@@ -304,11 +329,13 @@ class CodecTransmitterDisplay:
         self.current_color_frame = 0
         self.flash_counter = 0
         self.last_frame_time = _time.time()
+        self.remaining_start_frames = 0
 
     def start_transmission(self):
         self.reset_state()
         self.transmitting = True
         self.done = False
+        self.remaining_start_frames = self.start_signal_frames
         print(f"\n[TX] Starting auto-transmission at {self.fps:.2f} FPS "
               f"({self.total_frames} frames)")
 
@@ -318,6 +345,14 @@ class CodecTransmitterDisplay:
         import time as _time
 
         now = _time.time()
+        if self.remaining_start_frames > 0:
+            if now - self.last_frame_time >= self.frame_interval:
+                self.last_frame_time = now
+                self.remaining_start_frames -= 1
+                if self.remaining_start_frames == 0:
+                    print("[TX] Start signal complete, streaming data...")
+            return
+
         if now - self.last_frame_time >= self.frame_interval:
             self.last_frame_time = now
             self._advance()
@@ -373,6 +408,8 @@ class CodecTransmitterDisplay:
                         x1 = j * self.cell_size
                         x2 = (j + 1) * self.cell_size
                         grid[y1:y2, x1:x2] = color
+        elif self.remaining_start_frames > 0:
+            grid[:] = COLORS_8[START_SIGNAL_COLOR_INDEX]
         elif self.done:
             grid[:] = [0, 255, 0]
         else:
@@ -403,6 +440,7 @@ class CodecTransmitterDisplay:
         image[border:-border, -border-frame_width:-border] = [0, 0, 0]
 
         status = "CALIBRATION" if not self.transmitting else (
+            "START SIGNAL" if self.remaining_start_frames > 0 else
             "DONE" if self.done else
             f"G{self.current_grid_idx+1}/{self.encoded_grids.shape[0]} "
             f"R{self.current_row_slice+1}/{self.num_row_slices} "
@@ -464,7 +502,7 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size):
 
 def run_tx(args):
     tensor = load_tensor(args)
-    tx = CodecTransmitterDisplay(tensor, args.grid_size, args.fps)
+    tx = CodecTransmitterDisplay(tensor, args.grid_size, args.fps, args.start_signal_seconds)
 
     cv2.namedWindow("Codec TX", cv2.WINDOW_NORMAL)
     cv2.setWindowProperty("Codec TX", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
@@ -475,6 +513,9 @@ def run_tx(args):
     print(f"Tensor: {tensor.shape}, dtype={tensor.dtype}")
     print(f"Visual grid: {args.grid_size}x{args.grid_size}, FPS: {args.fps}")
     print(f"Total frames to send: {tx.expected_frames()}")
+    if tx.start_signal_frames > 0:
+        print(f"Start signal: solid green for {tx.start_signal_frames} frame(s) "
+              f"({tx.start_signal_seconds:.2f}s) before data begins")
     print("Controls: 'p' to start, 'r' to reset, 'q' to quit")
     print("Use this window full-screen facing the receiver camera.\n")
 
@@ -510,7 +551,12 @@ def run_rx(args):
 
     captured_frames = []
     capture_active = False
-    last_hash = None
+    last_pattern = None
+    pending_pattern = None
+    pending_consistency = 0
+    capture_threshold = max(0.0, min(1.0, args.capture_threshold))
+    capture_tolerance = max(0.0, min(1.0, args.capture_tolerance))
+    capture_stability = max(1, args.capture_stability)
 
     print("\n" + "=" * 70)
     print("RX MODE - CODEC VISUAL LINK")
@@ -525,6 +571,8 @@ def run_rx(args):
     print("  +/- - Adjust border offset")
     print("  q   - Quit")
     print("=" * 70)
+    print(f"Capture threshold: {capture_threshold*100:.1f}% change, "
+          f"tolerance {capture_tolerance*100:.1f}%, stability {capture_stability} frame(s)")
 
     while True:
         ret, frame = cap.read()
@@ -543,32 +591,59 @@ def run_rx(args):
 
             if capture_active:
                 pattern = rx.read_color_pattern(frame, args.grid_size)
-                if pattern is not None:
-                    if is_calibration_pattern(pattern):
-                        continue
-                    pattern_hash = pattern.tobytes()
-                    if pattern_hash != last_hash:
-                        last_hash = pattern_hash
-                        captured_frames.append(pattern.copy())
-                        total_captured = len(captured_frames)
-                        print(f"\r[RX] Captured frame {total_captured}/{total_frames_needed}", end='', flush=True)
+                if pattern is None:
+                    continue
+                if is_calibration_pattern(pattern) or is_start_signal(pattern):
+                    continue
 
-                        if total_captured >= total_frames_needed:
-                            print("\n[RX] Frames collected - decoding...")
-                            try:
-                                grids = decode_captured_frames(captured_frames, c, args.rows, args.cols, args.grid_size)
-                                decoded_tensor = c.decode(grids)
-                                print("[RX] ✓ Decode complete!")
-                                print(f"[RX] Decoded tensor: {decoded_tensor.shape}, dtype={decoded_tensor.dtype}")
-                                print(f"[RX] Sample row: {decoded_tensor[0, :5]}")
-                                if args.save_decoded:
-                                    np.save(args.save_decoded, decoded_tensor)
-                                    print(f"[RX] Saved tensor to {args.save_decoded}")
-                            except Exception as err:
-                                print(f"[RX] ✗ Decode failed: {err}")
-                            capture_active = False
-        else:
-            capture_active = False
+                total_cells = pattern.size
+                min_changed = max(1, int(total_cells * capture_threshold))
+                tolerance_cells = max(1, int(total_cells * capture_tolerance))
+                diff_last = total_cells if last_pattern is None else count_changed_cells(pattern, last_pattern)
+                if diff_last < min_changed:
+                    continue
+
+                if pending_pattern is None:
+                    pending_pattern = pattern.copy()
+                    pending_consistency = 1
+                    continue
+
+                diff_pending = count_changed_cells(pattern, pending_pattern)
+                if diff_pending <= tolerance_cells:
+                    pending_consistency += 1
+                    pending_pattern = pattern.copy()
+                else:
+                    pending_pattern = pattern.copy()
+                    pending_consistency = 1
+
+                if pending_consistency >= capture_stability:
+                    last_pattern = pending_pattern.copy()
+                    captured_frames.append(last_pattern.copy())
+                    pending_pattern = None
+                    pending_consistency = 0
+                    total_captured = len(captured_frames)
+                    print(f"\r[RX] Captured frame {total_captured}/{total_frames_needed} "
+                          f"(diff vs last {diff_last})", end='', flush=True)
+
+                    if total_captured >= total_frames_needed:
+                        print("\n[RX] Frames collected - decoding...")
+                        try:
+                            grids = decode_captured_frames(captured_frames, c, args.rows, args.cols, args.grid_size)
+                            decoded_tensor = c.decode(grids)
+                            print("[RX] ✓ Decode complete!")
+                            print(f"[RX] Decoded tensor: {decoded_tensor.shape}, dtype={decoded_tensor.dtype}")
+                            print(f"[RX] Sample row: {decoded_tensor[0, :5]}")
+                            if args.save_decoded:
+                                np.save(args.save_decoded, decoded_tensor)
+                                print(f"[RX] Saved tensor to {args.save_decoded}")
+                        except Exception as err:
+                            print(f"[RX] ✗ Decode failed: {err}")
+                        capture_active = False
+            else:
+                capture_active = False
+                last_pattern = None
+                pending_pattern = None
+                pending_consistency = 0
 
         if capture_active:
             info = f"CAPTURING {len(captured_frames)}/{total_frames_needed}"
@@ -589,6 +664,11 @@ def run_rx(args):
             if rx.calibrated:
                 rx.calibrated = False
                 rx.locked_corners = None
+                capture_active = False
+                captured_frames.clear()
+                last_pattern = None
+                pending_pattern = None
+                pending_consistency = 0
                 print("\n[RX] Calibration reset")
             else:
                 if rx.calibrate(frame):
@@ -601,11 +681,15 @@ def run_rx(args):
             else:
                 capture_active = True
                 captured_frames.clear()
-                last_hash = None
+                last_pattern = None
+                pending_pattern = None
+                pending_consistency = 0
                 print("\n[RX] Capture started - waiting for frames...")
         elif key == ord('r'):
             captured_frames.clear()
-            last_hash = None
+            last_pattern = None
+            pending_pattern = None
+            pending_consistency = 0
             capture_active = False
             print("\n[RX] Captured frames cleared")
         elif key == ord('f'):
@@ -627,12 +711,20 @@ def build_arg_parser():
     parser.add_argument('--mode', required=True, choices=['tx', 'rx'], help='Run as transmitter or receiver')
     parser.add_argument('--grid-size', type=int, default=VISUAL_GRID_SIZE, help='Visual grid resolution')
     parser.add_argument('--fps', type=float, default=TRANSMISSION_FPS, help='TX frames per second')
+    parser.add_argument('--start-signal-seconds', type=float, default=1.0,
+                        help='Duration to show solid green start signal before frames')
     parser.add_argument('--rows', type=int, default=TEST_TENSOR_ROWS, help='Tensor rows')
     parser.add_argument('--cols', type=int, default=TEST_TENSOR_COLS, help='Tensor cols')
     parser.add_argument('--tensor', type=str, help='Path to .npy tensor for TX mode')
     parser.add_argument('--seed', type=int, default=42, help='Seed for random tensor (TX)')
     parser.add_argument('--camera-index', type=int, default=0, help='Camera index for RX mode')
     parser.add_argument('--save-decoded', type=str, help='Path to save decoded tensor (RX mode)')
+    parser.add_argument('--capture-threshold', type=float, default=0.05,
+                        help='Fraction of cells that must change before counting a new frame (RX)')
+    parser.add_argument('--capture-tolerance', type=float, default=0.02,
+                        help='Fraction of cells allowed to differ between stability samples (RX)')
+    parser.add_argument('--capture-stability', type=int, default=2,
+                        help='Number of consecutive stable samples before recording a frame (RX)')
     return parser
 
 
