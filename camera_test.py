@@ -99,6 +99,106 @@ def test_harness() -> None:
     cv2.imshow('Receiver Side B', receiver_b_display)
     cv2.waitKey(1)
 
+    # Color calibration phase
+    input("\nPress Enter to start color calibration...")
+
+    print("\n" + "="*60)
+    print("COLOR CALIBRATION")
+    print("="*60)
+
+    import time
+
+    # Initialize calibration arrays
+    cam_a.calibrated_colors = np.zeros(
+        (16, 16, len([0,1,2,3,4,5,6,7]), 3), dtype=np.float32)
+    cam_b.calibrated_colors = np.zeros(
+        (16, 16, len([0,1,2,3,4,5,6,7]), 3), dtype=np.float32)
+
+    # Track state for both receivers
+    prev_samples_a = None
+    prev_samples_b = None
+    color_idx_a = 0
+    color_idx_b = 0
+    frames_stable_a = 0
+    frames_stable_b = 0
+    STABILIZATION_FRAMES = 3
+
+    # Calibrate both sides simultaneously
+    print("\nCalibrating both sides...")
+    start_time = time.time()
+
+    while color_idx_a < 8 or color_idx_b < 8:
+        elapsed = time.time() - start_time
+        current_color = min(int(elapsed), 7)  # 0-7 based on seconds elapsed
+
+        if cap is not None:
+            ret, webcam_frame = cap.read()
+            if not ret:
+                webcam_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        else:
+            webcam_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+        # Side A transmits, B receives
+        pattern_a = cam_a._render_color_calibration_pattern(current_color)
+        receiver_b_feed = overlay_centered(webcam_frame, pattern_a)
+        cam_b.test_camera_input = receiver_b_feed
+
+        # Side B transmits, A receives
+        pattern_b = cam_b._render_color_calibration_pattern(current_color)
+        receiver_a_feed = overlay_centered(webcam_frame, pattern_b)
+        cam_a.test_camera_input = receiver_a_feed
+
+        # Display both
+        cv2.imshow('Receiver Side A', receiver_a_feed)
+        cv2.imshow('Receiver Side B', receiver_b_feed)
+        cv2.waitKey(30)
+
+        # Process Side A receiver
+        if color_idx_a < 8:
+            curr_samples_a = cam_a._capture_color_samples()
+            if prev_samples_a is None:
+                frames_stable_a = 0
+            elif cam_a._detect_color_change(prev_samples_a, curr_samples_a):
+                frames_stable_a = 0
+            else:
+                frames_stable_a += 1
+
+            if frames_stable_a == STABILIZATION_FRAMES:
+                cam_a.calibrated_colors[:, :, color_idx_a, :] = curr_samples_a
+                print(f"  ✓ Side A captured color {color_idx_a}")
+                color_idx_a += 1
+                frames_stable_a = -1000
+
+            prev_samples_a = curr_samples_a.copy()
+
+        # Process Side B receiver
+        if color_idx_b < 8:
+            curr_samples_b = cam_b._capture_color_samples()
+            if prev_samples_b is None:
+                frames_stable_b = 0
+            elif cam_b._detect_color_change(prev_samples_b, curr_samples_b):
+                frames_stable_b = 0
+            else:
+                frames_stable_b += 1
+
+            if frames_stable_b == STABILIZATION_FRAMES:
+                cam_b.calibrated_colors[:, :, color_idx_b, :] = curr_samples_b
+                print(f"  ✓ Side B captured color {color_idx_b}")
+                color_idx_b += 1
+                frames_stable_b = -1000
+
+            prev_samples_b = curr_samples_b.copy()
+
+        # Stop after 10 seconds max
+        if elapsed > 10:
+            break
+
+    if color_idx_a == 8 and color_idx_b == 8:
+        print("\n✓✓✓ COLOR CALIBRATION COMPLETE!")
+    else:
+        print(f"\n✗ Color calibration incomplete (A: {color_idx_a}/8, B: {color_idx_b}/8)")
+        return
+
     # Data transmission phase
     input("\nPress Enter to send test pattern...")
 
