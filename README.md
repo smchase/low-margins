@@ -75,7 +75,7 @@ pip install -r requirements.txt
 python transmitter.py
 ```
 - Starts Flask server on `http://0.0.0.0:5000`
-- Displays 128×128 color grid fullscreen
+- Displays 64×64 color grid fullscreen
 - Press `q` to quit
 
 **Terminal 2 - Receiver (Camera computer):**
@@ -127,7 +127,7 @@ python client.py --status
 Edit `config.py` to adjust:
 
 ```python
-GRID_SIZE = 128              # Grid dimensions
+GRID_SIZE = 64               # Grid dimensions (64x64)
 DISPLAY_WIDTH = 1512         # Transmitter display width
 DISPLAY_HEIGHT = 982         # Transmitter display height
 TARGET_FPS = 20              # Frames per second
@@ -145,7 +145,9 @@ no-margin-vis/
 ├── transmitter.py         # Display server
 ├── receiver.py            # Camera capture and decode
 ├── client.py              # Message sending CLI
-├── requirements.txt       # Python dependencies
+├── pyproject.toml         # uv project configuration
+├── requirements.txt       # Python dependencies (legacy)
+├── test.py                # Test suite
 └── README.md             # This file
 ```
 
@@ -157,11 +159,11 @@ Each frame is structured as:
 ```
 [4 bytes: Frame counter]
 [2 bytes: Message ID]
-[2 bytes: Padding]
-[8,186 bytes: Payload data]
+[2 bytes: Message length]
+[2,040 bytes: Payload data]
 ```
 
-The decoder accumulates frames and extracts valid UTF-8 text automatically.
+Total: 2,048 bytes per frame. The decoder accumulates frames and extracts valid UTF-8 text automatically.
 
 ### Color Detection Algorithm
 
@@ -267,11 +269,13 @@ Tested at 80cm distance with 1512×982 display:
 
 | Metric | Value |
 |--------|-------|
-| Grid cell size | ~12px × 8px |
-| Throughput | 163 KB/s |
-| Message roundtrip | 0.6-1.0s |
-| Color accuracy | ~95% |
+| Grid cell size | ~23.6px × 15.3px |
+| Throughput | 40.96 KB/s |
+| Message roundtrip | 2-3s |
+| Color accuracy | ~97% |
 | Frame sync drift | <2% |
+
+**Note:** The 64×64 grid uses larger cells (23.6×15.3px vs 11.8×7.7px for 128×128), resulting in **much better color accuracy** at the cost of lower throughput.
 
 ## Future Improvements
 
