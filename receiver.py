@@ -151,8 +151,17 @@ class ReceiverApp:
         print("Display thread started")
 
         window_name = "NO-MARGIN-VIS Receiver"
-        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(window_name, DISPLAY_WIDTH * 2, DISPLAY_HEIGHT)
+        display_available = False
+
+        try:
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(window_name, DISPLAY_WIDTH * 2, DISPLAY_HEIGHT)
+            display_available = True
+            print("Display window created successfully")
+        except cv2.error as e:
+            print(f"WARNING: Display not available - running in headless mode")
+            print(f"  (This is normal on headless/remote systems)")
+            print(f"  Grid decoding is still working")
 
         while self.running:
             display_start = time.time()
@@ -165,76 +174,82 @@ class ReceiverApp:
                 time.sleep(0.01)
                 continue
 
-            # Left side: camera feed
-            h, w = frame.shape[:2]
-            # Scale to fit left half
-            target_h = DISPLAY_HEIGHT
-            target_w = int(target_h * w / h)
-            camera_display = cv2.resize(frame, (target_w, target_h))
+            # Only display if display is available
+            if display_available:
+                # Left side: camera feed
+                h, w = frame.shape[:2]
+                # Scale to fit left half
+                target_h = DISPLAY_HEIGHT
+                target_w = int(target_h * w / h)
+                camera_display = cv2.resize(frame, (target_w, target_h))
 
-            # Pad to exact width
-            pad_left = (DISPLAY_WIDTH - target_w) // 2
-            pad_right = DISPLAY_WIDTH - target_w - pad_left
-            camera_display = cv2.copyMakeBorder(
-                camera_display, 0, 0, pad_left, pad_right,
-                cv2.BORDER_CONSTANT, value=(0, 0, 0)
-            )
+                # Pad to exact width
+                pad_left = (DISPLAY_WIDTH - target_w) // 2
+                pad_right = DISPLAY_WIDTH - target_w - pad_left
+                camera_display = cv2.copyMakeBorder(
+                    camera_display, 0, 0, pad_left, pad_right,
+                    cv2.BORDER_CONSTANT, value=(0, 0, 0)
+                )
 
-            # Right side: reconstructed grid
-            grid_display = np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
-            draw_grid(grid_display, grid, CELL_WIDTH, CELL_HEIGHT)
+                # Right side: reconstructed grid
+                grid_display = np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
+                draw_grid(grid_display, grid, CELL_WIDTH, CELL_HEIGHT)
 
-            # Add decoded message as text overlay
-            message = self.decoder.get_full_message()
-            y_offset = 40
-            x_offset = 10
+                # Add decoded message as text overlay
+                message = self.decoder.get_full_message()
+                y_offset = 40
+                x_offset = 10
 
-            # Display message with line wrapping
-            lines = []
-            max_chars_per_line = 40
-            for i in range(0, len(message), max_chars_per_line):
-                lines.append(message[i:i+max_chars_per_line])
+                # Display message with line wrapping
+                lines = []
+                max_chars_per_line = 40
+                for i in range(0, len(message), max_chars_per_line):
+                    lines.append(message[i:i+max_chars_per_line])
 
-            for i, line in enumerate(lines[-10:]):  # Show last 10 lines
-                y = y_offset + i * 25
-                if y < DISPLAY_HEIGHT - 20:
-                    cv2.putText(
-                        grid_display, line,
-                        (x_offset, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (255, 255, 255), 1
-                    )
+                for i, line in enumerate(lines[-10:]):  # Show last 10 lines
+                    y = y_offset + i * 25
+                    if y < DISPLAY_HEIGHT - 20:
+                        cv2.putText(
+                            grid_display, line,
+                            (x_offset, y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (255, 255, 255), 1
+                        )
 
-            # Add stats
-            stats = self.decoder.get_stats()
-            fps = self.fps_counter / (time.time() - self.fps_time + 0.001)
-            stats_text = f"FPS: {fps:.1f} | Frames: {stats['frames']} | Msg: {stats['message_length']}ch"
-            cv2.putText(
-                grid_display, stats_text,
-                (x_offset, DISPLAY_HEIGHT - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (0, 255, 0), 1
-            )
+                # Add stats
+                stats = self.decoder.get_stats()
+                fps = self.fps_counter / (time.time() - self.fps_time + 0.001)
+                stats_text = f"FPS: {fps:.1f} | Frames: {stats['frames']} | Msg: {stats['message_length']}ch"
+                cv2.putText(
+                    grid_display, stats_text,
+                    (x_offset, DISPLAY_HEIGHT - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (0, 255, 0), 1
+                )
 
-            # Combine left and right
-            combined = np.hstack([camera_display, grid_display])
+                # Combine left and right
+                combined = np.hstack([camera_display, grid_display])
 
-            cv2.imshow(window_name, combined)
-
-            # Handle key press
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                self.running = False
-            elif key == ord('c'):
-                # Clear decoded message
-                self.decoder.decoded_text = ""
+                try:
+                    cv2.imshow(window_name, combined)
+                    # Handle key press
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
+                        self.running = False
+                    elif key == ord('c'):
+                        # Clear decoded message
+                        self.decoder.decoded_text = ""
+                except cv2.error:
+                    # Display was lost
+                    display_available = False
 
             # Maintain frame rate
             elapsed = time.time() - display_start
             sleep_time = max(0, FRAME_TIME_MS / 1000.0 - elapsed)
             time.sleep(sleep_time)
 
-        cv2.destroyAllWindows()
+        if display_available:
+            cv2.destroyAllWindows()
 
     def start(self):
         """Start receiver"""
