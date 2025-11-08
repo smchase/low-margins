@@ -88,7 +88,7 @@ class Camera:
 
     def _render_calibration_boundary(self) -> NDArray[np.uint8]:
         size = 600
-        marker_size = 50
+        marker_size = 100
         img = np.ones((size, size, 3), dtype=np.uint8) * 255
         aruco_dict = cv2.aruco.getPredefinedDictionary(
             cv2.aruco.DICT_4X4_50)
