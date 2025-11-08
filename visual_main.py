@@ -830,8 +830,8 @@ def run_rx(args):
                                             print("[RX] Tip: Missing value 0 (black) - try increasing border with '+' key")
                                         if 7 in missing:
                                             print("[RX] Tip: Missing value 7 (white) - might be clipping, try decreasing border with '-' key")
-                        else:
-                            print("[RX] ✓ Decode complete!")
+                            else:
+                                print("[RX] ✓ Decode complete!")
                             
                             print(f"[RX] Decoded tensor: {decoded_tensor.shape}, dtype={decoded_tensor.dtype}")
                             print(f"[RX] Sample row: {decoded_tensor[0, :5]}")
