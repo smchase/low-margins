@@ -7,7 +7,7 @@ import cv2
 from typing import Optional
 
 ROWS = 40
-COLS = 60
+COLS = 70
 SQUARE_SIZE = 20
 PADDING = 25
 
