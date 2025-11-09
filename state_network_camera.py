@@ -20,6 +20,7 @@ from train.worker import Worker
 from enum import Enum
 import time
 import argparse
+from firebase import push_to_firebase_async, clear_models_folder
 
 
 class DistributedState(Enum):
@@ -251,6 +252,9 @@ def run_node(is_root, communicator, num_workers, num_steps, learning_rate=0.01, 
     if is_root:
         print(f"Root: Setting up communication with {num_workers} workers...")
         communicator.setup(num_workers=num_workers)
+        # Clear Firebase models folder before starting training
+        print(f"Root: Clearing Firebase models folder...")
+        clear_models_folder()
     else:
         print(f"Worker: Setting up communication with root...")
         communicator.setup()
@@ -425,12 +429,20 @@ def run_node(is_root, communicator, num_workers, num_steps, learning_rate=0.01, 
         if is_root:
             test_accuracy = node.evaluate(test_loader)
             eval_time = time.time() - eval_start_time
+            
+            # Set model back to train mode for next training step
+            node.model.train()
 
             avg_train_loss = total_train_loss / (step + 1)
             first_param_norm = torch.norm(list(node.model.parameters())[0]).item()
             
             print(f"\n{role}: Step {step+1}/{num_steps}")
             print(f"  Test Accuracy: {test_accuracy:.2f}%, param_norm={first_param_norm:.4f}")
+            
+            # Save model to Firebase every 5 steps (non-blocking)
+            if (step + 1) % 5 == 0 or step == 0:
+                print(f"  📤 Triggering Firebase upload for step {step+1}...")
+                push_to_firebase_async(node.model, step_count=step + 1, timeout=10)
         else:
             # Workers can just log their training loss
             avg_train_loss = total_train_loss / (step + 1)
