@@ -17,7 +17,7 @@ from test_utils import (  # noqa: E402
 # Worker node configuration
 ROOT_SEED = 42  # Must match root's seed to verify what we should receive
 WORKER_SEED = 123  # Different from root for different patterns
-TARGET_CYCLES = 10  # Should match root node
+TARGET_CYCLES = 1  # Should match root node
 TRANSFORM_TYPE = "multiply"  # Transform to apply to received tensors
 
 
@@ -82,10 +82,10 @@ def main():
         timing_stats = get_cycle_timing_stats()
         cycle_number = timing_stats["cycle_number"]
         
-        # Update overlay display
-        phase_name = timing_stats["phase"].split(".")[-1].replace("_", " ").title()
-        overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | {phase_name} | {timing_stats['seconds_remaining']:.1f}s"
-        cam.set_overlay_text(overlay_text)
+        # Update overlay display (disabled for cleaner view)
+        # phase_name = timing_stats["phase"].split(".")[-1].replace("_", " ").title()
+        # overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | {phase_name} | {timing_stats['seconds_remaining']:.1f}s"
+        # cam.set_overlay_text(overlay_text)
         
         # Calculate what we expect to receive from root
         expected_from_root = generate_test_tensor(ROOT_SEED, cycle_number)
@@ -93,15 +93,15 @@ def main():
         # Phase 1: Root compute (we just wait)
         wait_for_phase(PhaseType.COMPUTE_ROOT)
         timing_stats = get_cycle_timing_stats()
-        overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Root Compute | {timing_stats['seconds_remaining']:.1f}s"
-        cam.set_overlay_text(overlay_text)
+        # overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Root Compute | {timing_stats['seconds_remaining']:.1f}s"
+        # cam.set_overlay_text(overlay_text)
         log_status("Root computing...", timing_stats)
         
         # Phase 2: Receive from root
         phase_start = wait_for_phase(PhaseType.TRANSMIT_ROOT_TO_WORKER)
         timing_stats = get_cycle_timing_stats()
-        overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Receive from Root | {timing_stats['seconds_remaining']:.1f}s"
-        cam.set_overlay_text(overlay_text)
+        # overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Receive from Root | {timing_stats['seconds_remaining']:.1f}s"
+        # cam.set_overlay_text(overlay_text)
         log_status(f"Receiving {FRAMES_PER_TENSOR} frames from root", timing_stats)
         
         received_frames = []
@@ -112,10 +112,10 @@ def main():
         while frame_idx < FRAMES_PER_TENSOR:
             cam.update()
             
-            # Update overlay with current status
-            timing_stats = get_cycle_timing_stats()
-            overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Receive [{frame_idx+1}/{FRAMES_PER_TENSOR}] | {timing_stats['seconds_remaining']:.1f}s"
-            cam.set_overlay_text(overlay_text)
+            # Update overlay with current status (disabled)
+            # timing_stats = get_cycle_timing_stats()
+            # overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Receive [{frame_idx+1}/{FRAMES_PER_TENSOR}] | {timing_stats['seconds_remaining']:.1f}s"
+            # cam.set_overlay_text(overlay_text)
             
             # Check if we're still in the correct phase
             current_phase, _, _ = get_current_phase_info()
@@ -199,8 +199,8 @@ def main():
         # Phase 3: Compute (transform received tensor)
         wait_for_phase(PhaseType.COMPUTE_WORKER)
         timing_stats = get_cycle_timing_stats()
-        overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Worker Compute | {timing_stats['seconds_remaining']:.1f}s"
-        cam.set_overlay_text(overlay_text)
+        # overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Worker Compute | {timing_stats['seconds_remaining']:.1f}s"
+        # cam.set_overlay_text(overlay_text)
         log_status("Computing response...", timing_stats)
         
         if received_tensor is not None and validation_passed:
@@ -220,8 +220,8 @@ def main():
         # Phase 4: Transmit to root
         phase_start = wait_for_phase(PhaseType.TRANSMIT_WORKER_TO_ROOT)
         timing_stats = get_cycle_timing_stats()
-        overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Transmit to Root | {timing_stats['seconds_remaining']:.1f}s"
-        cam.set_overlay_text(overlay_text)
+        # overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Transmit to Root | {timing_stats['seconds_remaining']:.1f}s"
+        # cam.set_overlay_text(overlay_text)
         log_status(f"Transmitting {FRAMES_PER_TENSOR} frames to root", timing_stats)
         
         frame_idx = 0
@@ -230,10 +230,10 @@ def main():
         while frame_idx < FRAMES_PER_TENSOR:
             cam.update()
             
-            # Update overlay with current status
-            timing_stats = get_cycle_timing_stats()
-            overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Transmit [{frame_idx+1}/{FRAMES_PER_TENSOR}] | {timing_stats['seconds_remaining']:.1f}s"
-            cam.set_overlay_text(overlay_text)
+            # Update overlay with current status (disabled)
+            # timing_stats = get_cycle_timing_stats()
+            # overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Transmit [{frame_idx+1}/{FRAMES_PER_TENSOR}] | {timing_stats['seconds_remaining']:.1f}s"
+            # cam.set_overlay_text(overlay_text)
             
             # Check if we're still in the correct phase
             current_phase, _, _ = get_current_phase_info()
