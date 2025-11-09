@@ -6,9 +6,9 @@ from numpy.typing import NDArray
 import cv2
 from typing import Optional
 
-ROWS = 16
-COLS = 16
-SQUARE_SIZE = 50
+ROWS = 40
+COLS = 60
+SQUARE_SIZE = 20
 PADDING = 25
 
 DATA_WIDTH = COLS * SQUARE_SIZE
@@ -17,10 +17,17 @@ WINDOW_WIDTH = DATA_WIDTH + 2 * PADDING
 WINDOW_HEIGHT = DATA_HEIGHT + 2 * PADDING
 
 COLORS = [
-    (0, 0, 0),
-    (255, 255, 255),
+    (0, 0, 0),       # 000 - black
+    (0, 0, 255),     # 001 - blue
+    (0, 255, 0),     # 010 - green
+    (0, 255, 255),   # 011 - cyan
+    (255, 0, 0),     # 100 - red
+    (255, 0, 255),   # 101 - magenta
+    (255, 255, 0),   # 110 - yellow
+    (255, 255, 255), # 111 - white
 ]
-SECONDS_PER_FRAME = 1
+SECONDS_PER_FRAME = 0.2
+RECEIVE_OFFSET = 0
 
 
 class CalibrationState(enum.Enum):
@@ -117,6 +124,7 @@ class Camera:
                         ], dtype=np.float32)
                         self.warp_matrix = cv2.getPerspectiveTransform(detected, dst)
                         state = CalibrationState.RECEIVE_COLORS
+                        receiving_frames_stable = 4
                         print("✓ Markers detected and locked!")
                         print("Waiting for color patterns...")
 
@@ -162,29 +170,16 @@ class Camera:
         img = np.ones((WINDOW_HEIGHT, WINDOW_WIDTH, 3), dtype=np.uint8) * 255
         y = 50
 
-        in_data_mode = receive_done and transmit_done
-
-        if not in_data_mode:
-            rx = "X" if receive_done else " "
-            tx = "X" if transmit_done else " "
-            cv2.putText(img, f"[{rx}] Receive  [{tx}] Transmit", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
-            y += 80
-            cv2.putText(img, "T - Transmit calibration", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-            y += 40
-            cv2.putText(img, "R - Receive calibration", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-        else:
-            cv2.putText(img, "Ready for transmission", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
-            y += 80
-            cv2.putText(img, "T - Transmit data", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-            y += 40
-            cv2.putText(img, "R - Receive data", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-
+        rx = "X" if receive_done else " "
+        tx = "X" if transmit_done else " "
+        cv2.putText(img, f"[{rx}] Receive  [{tx}] Transmit", (20, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
+        y += 80
+        cv2.putText(img, "T - Transmit calibration", (20, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+        y += 40
+        cv2.putText(img, "R - Receive calibration", (20, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
         return img
 
     def _render_transmit_calibration(self, elapsed: float) -> NDArray[np.uint8]:
@@ -229,7 +224,16 @@ class Camera:
         marker_corners = {}
         for i, marker_id in enumerate(ids.flatten()):
             corner_points = corners[i][0]
-            marker_corners[marker_id] = corner_points[marker_id]
+            # ArUco corners are in order: top-left, top-right, bottom-right, bottom-left
+            # We want the corner of each marker that corresponds to its position:
+            # marker 0 (top-left): use top-left corner [0]
+            # marker 1 (top-right): use top-right corner [1]
+            # marker 2 (bottom-right): use bottom-right corner [2]
+            # marker 3 (bottom-left): use bottom-left corner [3]
+            if 0 <= marker_id <= 3:
+                marker_corners[marker_id] = corner_points[marker_id]
+            else:
+                return None
 
         return np.array([
             marker_corners[0],
