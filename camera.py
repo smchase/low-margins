@@ -6,9 +6,9 @@ from numpy.typing import NDArray
 import cv2
 from typing import Optional
 
-ROWS = 16
-COLS = 16
-SQUARE_SIZE = 50
+ROWS = 20
+COLS = 30
+SQUARE_SIZE = 40
 PADDING = 25
 
 DATA_WIDTH = COLS * SQUARE_SIZE
@@ -17,8 +17,14 @@ WINDOW_WIDTH = DATA_WIDTH + 2 * PADDING
 WINDOW_HEIGHT = DATA_HEIGHT + 2 * PADDING
 
 COLORS = [
-    (255, 0, 0),
-    (0, 255, 255),
+    (0, 0, 0),       # 000 - black
+    (0, 0, 255),     # 001 - blue
+    (0, 255, 0),     # 010 - green
+    (0, 255, 255),   # 011 - cyan
+    (255, 0, 0),     # 100 - red
+    (255, 0, 255),   # 101 - magenta
+    (255, 255, 0),   # 110 - yellow
+    (255, 255, 255), # 111 - white
 ]
 SECONDS_PER_FRAME = 1
 
