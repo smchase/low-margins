@@ -33,7 +33,7 @@ if __name__ == "__main__":
 
     while True:
         cam.update()
-        key = cv2.waitKey(30) & 0xFF
+        key = cv2.waitKey(1) & 0xFF
         if key == ord(' '):
             break
 
@@ -43,12 +43,12 @@ if __name__ == "__main__":
         current = int(time.time())
         while int(time.time()) == current:
             cam.update()
-            cv2.waitKey(30)
+            cv2.waitKey(1)
 
     # Now wait for the next 5-second boundary
     while int(time.time()) % 5 != 0:
         cam.update()
-        cv2.waitKey(30)
+        cv2.waitKey(1)
 
     # We're at a 5-second boundary - record start time
     start_time = time.time()
@@ -70,7 +70,7 @@ if __name__ == "__main__":
             print(f"[t={elapsed:.3f}s] Transmitted frame {frame_number} (target: {target_time:.3f}s)")
             frame_number += 1
 
-        cv2.waitKey(30)
+        cv2.waitKey(1)
     
     if frame_number >= len(test_cases):
         print(f"\n✓ All {len(test_cases)} test cases transmitted!")
@@ -80,7 +80,7 @@ if __name__ == "__main__":
         end_time = time.time() + (SECONDS_PER_FRAME * 2)
         while time.time() < end_time:
             cam.update()
-            cv2.waitKey(30)
+            cv2.waitKey(1)
 
         print("Done!") 
 

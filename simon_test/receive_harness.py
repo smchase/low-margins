@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from camera import Camera, Frame, ROWS, COLS, COLORS, SECONDS_PER_FRAME  # noqa: E402
+from camera import Camera, Frame, ROWS, COLS, COLORS, SECONDS_PER_FRAME, RECEIVE_OFFSET  # noqa: E402
 
 
 def load_test_data(filename: str = "test_data.json"):
@@ -33,7 +33,7 @@ if __name__ == "__main__":
 
     while True:
         cam.update()
-        key = cv2.waitKey(30) & 0xFF
+        key = cv2.waitKey(1) & 0xFF
         if key == ord(' '):
             break
 
@@ -43,17 +43,22 @@ if __name__ == "__main__":
         current = int(time.time())
         while int(time.time()) == current:
             cam.update()
-            cv2.waitKey(30)
+            cv2.waitKey(1)
 
     # Now wait for the next 5-second boundary
     while int(time.time()) % 5 != 0:
         cam.update()
-        cv2.waitKey(30)
+        cv2.waitKey(1)
 
     # We're at a 5-second boundary - record start time
     start_time = time.time()
     print(f"GO! Starting reception at t={start_time:.3f} (unix second {int(start_time)})")
-    print(f"Will receive at midpoint of each frame period")
+    if RECEIVE_OFFSET > 0:
+        print(f"Will receive {RECEIVE_OFFSET}s after each frame starts")
+    elif RECEIVE_OFFSET < 0:
+        print(f"Will receive {-RECEIVE_OFFSET}s before each frame starts")
+    else:
+        print(f"Will receive exactly when each frame starts")
 
     frame_number = 0
 
@@ -67,8 +72,12 @@ if __name__ == "__main__":
         cam.update()
 
         elapsed = time.time() - start_time
-        # Receive at the midpoint of each frame period
-        target_time = (frame_number + 0.5) * SECONDS_PER_FRAME
+        # Receive at: frame_time + RECEIVE_OFFSET
+        # Positive RECEIVE_OFFSET = after frame, Negative = before frame
+        target_time = frame_number * SECONDS_PER_FRAME + RECEIVE_OFFSET
+        # Ensure we don't have negative target times (clamp to 0)
+        if target_time < 0:
+            target_time = 0
 
         # Receive when we've reached or passed the target time for this frame
         if elapsed >= target_time:
@@ -83,19 +92,35 @@ if __name__ == "__main__":
             # Count wrong pixels
             pixels_wrong = np.sum(received.data != expected)
             total_pixels_wrong += pixels_wrong
+            
+            # Check for timing issues - did we capture the wrong frame?
+            timing_info = ""
+            if not matches:
+                # Check if it matches the previous frame (captured too early)
+                if frame_number > 0:
+                    prev_expected = test_cases[frame_number - 1]
+                    if np.array_equal(received.data, prev_expected):
+                        timing_info = " [TIMING: EARLY - got previous frame]"
+                
+                # Check if it matches the next frame (captured too late)
+                if not timing_info and frame_number < len(test_cases) - 1:
+                    next_expected = test_cases[frame_number + 1]
+                    if np.array_equal(received.data, next_expected):
+                        timing_info = " [TIMING: LATE - got next frame]"
 
             results.append({
                 'test_idx': frame_number,
                 'matches': matches,
-                'pixels_wrong': pixels_wrong
+                'pixels_wrong': pixels_wrong,
+                'timing_info': timing_info
             })
 
             print(f"[t={elapsed:.3f}s] Frame {frame_number} (target: {target_time:.3f}s): "
-                  f"Match={matches}, Pixels wrong={pixels_wrong}/{ROWS*COLS}")
+                  f"Match={matches}, Pixels wrong={pixels_wrong}/{ROWS*COLS}{timing_info}")
 
             frame_number += 1
 
-        cv2.waitKey(30)
+        cv2.waitKey(1)
     
     # Final report
     print("\n" + "="*60)
@@ -115,4 +140,5 @@ if __name__ == "__main__":
     print("\nDetailed results:")
     for result in results:
         status = "✓" if result['matches'] else "✗"
-        print(f"  {status} Frame {result['test_idx']}: {result['pixels_wrong']} pixels wrong")
+        timing = result.get('timing_info', '')
+        print(f"  {status} Frame {result['test_idx']}: {result['pixels_wrong']} pixels wrong{timing}")
