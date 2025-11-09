@@ -47,8 +47,7 @@ class Camera:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
-        cv2.namedWindow('low margins', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('low margins', WINDOW_WIDTH, WINDOW_HEIGHT)
+        cv2.namedWindow('low margins', cv2.WINDOW_AUTOSIZE)
 
     def calibrate(self) -> bool:
         state = CalibrationState.INSTRUCTIONS
@@ -193,7 +192,7 @@ class Camera:
 
         if elapsed < 2.0:
             # Render markers
-            marker_size = 50
+            marker_size = 100
             aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
             positions = [
                 (PADDING, PADDING),
