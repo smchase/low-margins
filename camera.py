@@ -47,6 +47,7 @@ class Camera:
         self.warp_matrix: Optional[NDArray[np.float32]] = None
         self.calibrated_colors: NDArray[np.float32] = np.zeros((ROWS, COLS, len(COLORS), 3), dtype=np.float32)
         self.curent_transmission: Optional[Frame] = None
+        self.overlay_text: Optional[str] = None
 
         self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
@@ -286,10 +287,29 @@ class Camera:
             display = img
         else:
             display = self._render_instructions(True, True)
+        
+        # Add overlay text if provided
+        if self.overlay_text is not None:
+            # Draw background rectangle for better readability
+            text_size = cv2.getTextSize(self.overlay_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+            text_x = WINDOW_WIDTH - text_size[0] - 10
+            text_y = 30
+            cv2.rectangle(display, 
+                         (text_x - 5, text_y - text_size[1] - 5),
+                         (WINDOW_WIDTH - 5, text_y + 5),
+                         (0, 0, 0), -1)
+            # Draw text
+            cv2.putText(display, self.overlay_text, (text_x, text_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        
         cv2.imshow('low margins', display)
 
     def transmit(self, frame: Frame) -> None:
         self.curent_transmission = frame
+
+    def set_overlay_text(self, text: Optional[str]) -> None:
+        """Set the overlay text to display in the top right corner."""
+        self.overlay_text = text
 
     def receive(self) -> Frame:
         ret, frame = self.cap.read()

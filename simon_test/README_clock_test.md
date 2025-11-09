@@ -47,6 +47,26 @@ The test implements an 11-second cycle with precise clock synchronization:
 5. **Monitor progress**:
    - Watch the console output for cycle status and timing accuracy
    - The test runs for 10 complete cycles (110 seconds)
+   - **Visual overlay**: The top-right corner of the camera window shows:
+     - Node type (ROOT or WORKER)
+     - Current cycle number
+     - Current phase (e.g., "Transmit to Worker", "Worker Compute")
+     - Time remaining in current phase
+     - Frame progress during transmission/reception
+
+## Visual Status Display
+
+The camera window shows real-time status in the top-right corner:
+
+```
+ROOT | Cycle 3/10 | Transmit [5/9] | 2.3s
+```
+
+This indicates:
+- **ROOT**: Node type (ROOT or WORKER)
+- **Cycle 3/10**: Current cycle out of total cycles
+- **Transmit [5/9]**: Current phase and frame progress
+- **2.3s**: Time remaining in current phase
 
 ## Technical Details
 
