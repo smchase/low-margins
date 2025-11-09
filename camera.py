@@ -68,7 +68,7 @@ class Camera:
         print("  T - Transmit calibration (show markers + colors)")
         print("  R - Receive calibration (detect markers + colors from other side)")
         print("  S - Send random data (after both calibrations complete)")
-        print("  D - Decode/receive data (after both calibrations complete)")
+        print("  R - Receive data (after both calibrations complete)")
         print("  Q - Quit")
         print("\nTYPICAL FLOW (two computers):")
         print("  1. Computer A: Press T (transmit calibration)")
@@ -94,8 +94,8 @@ class Camera:
 
         if not in_data_mode:
             # Calibration mode
-            check_rx = "✓" if self.receive_calibration_done else "☐"
-            check_tx = "✓" if self.transmit_calibration_done else "☐"
+            check_rx = "[X]" if self.receive_calibration_done else "[ ]"
+            check_tx = "[X]" if self.transmit_calibration_done else "[ ]"
 
             cv2.putText(img, "CALIBRATION STATUS:",
                        (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
@@ -130,7 +130,7 @@ class Camera:
             cv2.putText(img, "S - Send random data",
                        (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
             y += 60
-            cv2.putText(img, "D - Decode/receive data",
+            cv2.putText(img, "R - Receive data",
                        (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
             y += 60
             cv2.putText(img, "Q - Quit",
@@ -573,7 +573,7 @@ if __name__ == "__main__":
 
     # Main data transmission loop
     print("\nEntering data transmission mode...")
-    print("Press S to send random data, D to decode data, Q to quit")
+    print("Press S to send random data, R to receive data, Q to quit")
 
     # Start with instructions
     cam.display_mode = "instructions"
@@ -599,10 +599,10 @@ if __name__ == "__main__":
             cam.display_data = Frame(data=data)
             cam.display_mode = "send_data"
             print(f"Sending data:\n{data}")
-        elif key == ord('d') or key == ord('D'):
-            # Decode data - don't change display mode
+        elif key == ord('r') or key == ord('R'):
+            # Receive data - don't change display mode
             received = cam.receive()
-            print(f"Decoded data:\n{received.data}")
+            print(f"Received data:\n{received.data}")
 
     # Cleanup
     cv2.destroyAllWindows()
