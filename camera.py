@@ -117,6 +117,7 @@ class Camera:
                         ], dtype=np.float32)
                         self.warp_matrix = cv2.getPerspectiveTransform(detected, dst)
                         state = CalibrationState.RECEIVE_COLORS
+                        receiving_frames_stable = 4
                         print("✓ Markers detected and locked!")
                         print("Waiting for color patterns...")
 
