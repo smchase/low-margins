@@ -80,6 +80,9 @@ def tensors_to_frames(tensors: List[torch.Tensor]) -> List[Frame]:
         if tensor is not None:
             # Detach if tensor requires grad
             t = tensor.detach() if tensor.requires_grad else tensor
+            # Convert bfloat16 to float32 first, then to float16
+            if t.dtype == torch.bfloat16:
+                t = t.float()  # bfloat16 -> float32
             flat_values.extend(t.cpu().numpy().flatten().astype(np.float16))
     
     total_floats = len(flat_values)
@@ -115,8 +118,14 @@ def tensors_to_frames(tensors: List[torch.Tensor]) -> List[Frame]:
     return frames
 
 
-def frames_to_tensors(frames: List[Frame], tensor_shapes: List[Tuple]) -> List[torch.Tensor]:
-    """Convert camera frames back to torch tensors with original shapes."""
+def frames_to_tensors(frames: List[Frame], tensor_shapes: List[Tuple], target_dtype: torch.dtype = None) -> List[torch.Tensor]:
+    """Convert camera frames back to torch tensors with original shapes.
+    
+    Args:
+        frames: List of camera frames
+        tensor_shapes: List of tensor shapes to reconstruct
+        target_dtype: Target dtype for tensors (defaults to float32, can be bfloat16)
+    """
     # Decode all values
     all_values = []
     
@@ -159,16 +168,22 @@ def frames_to_tensors(frames: List[Frame], tensor_shapes: List[Tuple]) -> List[t
     tensors = []
     value_idx = 0
     
+    if target_dtype is None:
+        target_dtype = torch.float32
+    
     for shape in tensor_shapes:
         num_elements = np.prod(shape)
         if value_idx + num_elements <= len(all_values):
             tensor_values = all_values[value_idx:value_idx + num_elements]
+            # First create as float32, then convert to target dtype
             tensor = torch.tensor(tensor_values, dtype=torch.float32).reshape(shape)
+            if target_dtype != torch.float32:
+                tensor = tensor.to(target_dtype)
             tensors.append(tensor)
             value_idx += num_elements
         else:
             # Not enough values, create zero tensor
-            tensors.append(torch.zeros(shape, dtype=torch.float32))
+            tensors.append(torch.zeros(shape, dtype=target_dtype))
     
     return tensors
 

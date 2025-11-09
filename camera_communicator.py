@@ -150,8 +150,8 @@ class CameraCommunicator:
         print(f"Root: Receiving {self.num_frames} gradient frames from worker")
         frames = self._receive_frames(self.num_frames)
         
-        # Convert back to tensors
-        gradients = frames_to_tensors(frames, self.param_shapes)
+        # Convert back to tensors (gradients are typically bfloat16)
+        gradients = frames_to_tensors(frames, self.param_shapes, target_dtype=torch.bfloat16)
         all_gradients.append(gradients)
         
         return all_gradients
@@ -203,8 +203,8 @@ class CameraCommunicator:
         print(f"Worker: Receiving {self.num_frames} parameter frames from root")
         frames = self._receive_frames(self.num_frames)
         
-        # Convert back to tensors
-        parameters = frames_to_tensors(frames, self.param_shapes)
+        # Convert back to tensors (model parameters are bfloat16)
+        parameters = frames_to_tensors(frames, self.param_shapes, target_dtype=torch.bfloat16)
         return parameters
     
     def close(self):
