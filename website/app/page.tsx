@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import * as ort from "onnxruntime-web";
 import { fetchMNISTImages, fetchMNISTLabels } from "@/utils/mnist";
+import { getModelUrl, listModelPaths } from "@/utils/firebase";
 
 const hasWebGPU = typeof navigator !== "undefined" && "gpu" in navigator;
 
@@ -13,23 +14,6 @@ type MnistResult = {
   pixels: Uint8Array;
 };
 
-// Extract step numbers from model filenames and sort chronologically
-function getStepModelPaths(): string[] {
-  const steps = [
-    { step: 50, path: "/models/steps/model_weights_step_50.onnx" },
-    { step: 100, path: "/models/steps/model_weights_step_100.onnx" },
-    { step: 150, path: "/models/steps/model_weights_step_150.onnx" },
-    { step: 200, path: "/models/steps/model_weights_step_200.onnx" },
-    { step: 250, path: "/models/steps/model_weights_step_250.onnx" },
-    { step: 300, path: "/models/steps/model_weights_step_300.onnx" },
-    { step: 350, path: "/models/steps/model_weights_step_350.onnx" },
-    { step: 400, path: "/models/steps/model_weights_step_400.onnx" },
-    { step: 450, path: "/models/steps/model_weights_step_450.onnx" },
-    { step: 500, path: "/models/steps/model_weights.onnx" },
-  ];
-
-  return steps.sort((a, b) => a.step - b.step).map(s => s.path);
-}
 
 
 function MnistCanvas({ pixels }: { pixels: Uint8Array }) {
@@ -72,15 +56,20 @@ export default function MnistPage() {
   const imagesRef = useRef<Uint8Array[]>([]);
   const labelsRef = useRef<Uint8Array>(new Uint8Array());
   const indicesRef = useRef<number[]>([]);
+  const processedStepPathsRef = useRef<Set<string>>(new Set());
+  const shouldContinueSimulatingRef = useRef<boolean>(false);
 
   // Function to run inference with a specific model
   const runInferenceWithModel = async (
-    modelPath: string,
+    modelStoragePath: string,
     images: Uint8Array[],
     labels: Uint8Array,
     indices: number[]
   ) => {
-    const session = await ort.InferenceSession.create(modelPath, {
+    // Fetch the download URL from Firebase Storage
+    const modelUrl = await getModelUrl(modelStoragePath);
+
+    const session = await ort.InferenceSession.create(modelUrl, {
       executionProviders: hasWebGPU ? ["webgpu", "wasm"] : ["wasm"],
     });
 
@@ -131,7 +120,7 @@ export default function MnistPage() {
     if (isSimulating) return;
 
     setIsSimulating(true);
-    const stepPaths = getStepModelPaths();
+    shouldContinueSimulatingRef.current = true;
 
     try {
       // Reset predictions to -1 before starting
@@ -141,22 +130,47 @@ export default function MnistPage() {
 
       setStatus("running inference…");
 
-      for (let stepIdx = 0; stepIdx < stepPaths.length; stepIdx++) {
-        const modelPath = stepPaths[stepIdx];
-        const stepName = modelPath.split("/").pop() || `Step ${stepIdx}`;
-        setCurrentStep(stepName);
+      // Continuous loop: fetch fresh list and process new models
+      while (shouldContinueSimulatingRef.current) {
+        // Fetch fresh list of model paths from Firebase Storage
+        const allStepPaths = await listModelPaths();
 
-        // Run inference with current step model
-        await runInferenceWithModel(
-          modelPath,
-          imagesRef.current,
-          labelsRef.current,
-          indicesRef.current
+        // Filter out paths that have already been processed
+        const unprocessedStepPaths = allStepPaths.filter(
+          (path) => !processedStepPathsRef.current.has(path)
         );
 
-        // Wait 5 seconds before next step (except for the last step)
-        if (stepIdx < stepPaths.length - 1) {
+        if (unprocessedStepPaths.length === 0) {
+          // No new models, wait a bit before checking again
+          setCurrentStep("");
           await new Promise((resolve) => setTimeout(resolve, 2000));
+          continue;
+        }
+
+        // Process all unprocessed models
+        for (let stepIdx = 0; stepIdx < unprocessedStepPaths.length; stepIdx++) {
+          // Check if we should continue before each iteration
+          if (!shouldContinueSimulatingRef.current) break;
+
+          const modelStoragePath = unprocessedStepPaths[stepIdx];
+          const stepName = modelStoragePath.split("/").pop() || `Step ${stepIdx}`;
+          setCurrentStep(stepName);
+
+          // Run inference with current step model (fetched from Firebase)
+          await runInferenceWithModel(
+            modelStoragePath,
+            imagesRef.current,
+            labelsRef.current,
+            indicesRef.current
+          );
+
+          // Mark this path as processed
+          processedStepPathsRef.current.add(modelStoragePath);
+
+          // Wait 2 seconds before next step (except for the last step)
+          if (stepIdx < unprocessedStepPaths.length - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+          }
         }
       }
 
@@ -167,6 +181,7 @@ export default function MnistPage() {
       setStatus("error");
       setCurrentStep("");
     } finally {
+      shouldContinueSimulatingRef.current = false;
       setIsSimulating(false);
     }
   };
