@@ -6,16 +6,15 @@ from typing import Optional
 
 WIDTH = 64
 HEIGHT = 32
-RANGE = 8
+RANGE = 7
 COLOR_MAP = [
-    (0, 0, 0),
-    (255, 255, 255),
-    (255, 0, 0),
-    (0, 255, 0),
-    (0, 0, 255),
-    (255, 255, 0),
-    (255, 0, 255),
-    (0, 255, 255),
+    (255, 255, 255),  # 0 - White
+    (255, 0, 0),      # 1 - Red
+    (0, 255, 0),      # 2 - Green
+    (0, 0, 255),      # 3 - Blue
+    (255, 255, 0),    # 4 - Yellow
+    (255, 0, 255),    # 5 - Magenta
+    (0, 255, 255),    # 6 - Cyan
 ]
 
 
@@ -211,8 +210,8 @@ class Camera:
                     self._transmit_color_idx = 0
             elif self.display_mode == "transmit_colors":
                 elapsed = time.time() - tx_start_time - 2.0
-                self._transmit_color_idx = min(int(elapsed), 7)
-                if elapsed >= 8.0:
+                self._transmit_color_idx = min(int(elapsed), 6)
+                if elapsed >= 7.0:
                     # Done transmitting - back to instructions
                     self.display_mode = "instructions"
                     self.transmit_calibration_done = True
@@ -272,7 +271,7 @@ class Camera:
                     rx_color_idx += 1
                     rx_frames_stable = -1000
 
-                    if rx_color_idx >= 8:
+                    if rx_color_idx >= 7:
                         print("✓ Receive calibration complete!")
                         self.receive_calibration_done = True
                         rx_state = "idle"
@@ -529,6 +528,7 @@ class Camera:
 
     def _capture_color_samples(self) -> NDArray[np.float32]:
         """Captures BGR values for all 256 grid positions from current frame.
+        Uses multi-sampling (10 points per cell) and averages them.
         Returns array of shape (HEIGHT, WIDTH, 3)."""
         if not self._is_calibrated():
             return np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
@@ -551,11 +551,26 @@ class Camera:
         cell_height = self.warp_height / HEIGHT
         samples = np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
 
+        # Number of sample points per cell for averaging
+        NUM_SAMPLES = 10
+
         for row in range(HEIGHT):
             for col in range(WIDTH):
-                y = min(self.warp_height - 1, int((row + 0.5) * cell_height))
-                x = min(self.warp_width - 1, int((col + 0.5) * cell_width))
-                samples[row, col] = unwarped[y, x].astype(np.float32)
+                # Sample multiple points within the cell and average
+                pixel_samples = []
+
+                for _ in range(NUM_SAMPLES):
+                    # Random sampling within the cell
+                    # Offset range: [0.2, 0.8] to avoid edges
+                    y_offset = 0.2 + 0.6 * np.random.random()
+                    x_offset = 0.2 + 0.6 * np.random.random()
+
+                    y = min(self.warp_height - 1, int((row + y_offset) * cell_height))
+                    x = min(self.warp_width - 1, int((col + x_offset) * cell_width))
+                    pixel_samples.append(unwarped[y, x].astype(np.float32))
+
+                # Average the samples for this cell
+                samples[row, col] = np.mean(pixel_samples, axis=0)
 
         return samples
 
@@ -579,7 +594,7 @@ class Camera:
 
     def calibrate_colors_receiver(self) -> bool:
         """Automatically detects and captures color calibration.
-        Monitors camera feed for color changes and captures all 8 colors.
+        Monitors camera feed for color changes and captures all 7 colors.
         Returns True on success."""
         if not self._is_calibrated():
             print("Error: Must complete geometric calibration first")
@@ -588,7 +603,7 @@ class Camera:
         print("Starting color calibration (receiver side)...")
         print("Waiting for transmitter to show colors...")
 
-        # Initialize calibration array: (HEIGHT, WIDTH, 8 colors, 3 BGR)
+        # Initialize calibration array: (HEIGHT, WIDTH, 7 colors, 3 BGR)
         self.calibrated_colors = np.zeros(
             (HEIGHT, WIDTH, len(COLOR_MAP), 3), dtype=np.float32)
 
@@ -670,32 +685,47 @@ class Camera:
         # Use calibrated colors if available, otherwise use COLOR_MAP
         use_calibrated = self.calibrated_colors is not None
 
+        # Number of sample points per cell for majority voting
+        NUM_SAMPLES = 10
+
         for row in range(HEIGHT):
             for col in range(WIDTH):
-                y = min(self.warp_height - 1, int((row + 0.5) * cell_height))
-                x = min(self.warp_width - 1, int((col + 0.5) * cell_width))
-                pixel = unwarped[y, x].astype(np.float32)
+                # Sample multiple points within the cell
+                votes = []
 
-                min_dist = float('inf')
-                best_idx = 0
+                for _ in range(NUM_SAMPLES):
+                    # Random sampling within the cell
+                    # Offset range: [0.2, 0.8] to avoid edges
+                    y_offset = 0.2 + 0.6 * np.random.random()
+                    x_offset = 0.2 + 0.6 * np.random.random()
 
-                if use_calibrated:
-                    # Compare to calibrated colors for this position
-                    for idx in range(len(COLOR_MAP)):
-                        color_ref = self.calibrated_colors[row, col, idx]
-                        dist = np.sum((pixel - color_ref) ** 2)
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_idx = idx
-                else:
-                    # Compare to ideal COLOR_MAP
-                    for idx, color in enumerate(COLOR_MAP):
-                        dist = np.sum((pixel - np.array(color)) ** 2)
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_idx = idx
+                    y = min(self.warp_height - 1, int((row + y_offset) * cell_height))
+                    x = min(self.warp_width - 1, int((col + x_offset) * cell_width))
+                    pixel = unwarped[y, x].astype(np.float32)
 
-                data[row, col] = best_idx
+                    min_dist = float('inf')
+                    best_idx = 0
+
+                    if use_calibrated:
+                        # Compare to calibrated colors for this position
+                        for idx in range(len(COLOR_MAP)):
+                            color_ref = self.calibrated_colors[row, col, idx]
+                            dist = np.sum((pixel - color_ref) ** 2)
+                            if dist < min_dist:
+                                min_dist = dist
+                                best_idx = idx
+                    else:
+                        # Compare to ideal COLOR_MAP
+                        for idx, color in enumerate(COLOR_MAP):
+                            dist = np.sum((pixel - np.array(color)) ** 2)
+                            if dist < min_dist:
+                                min_dist = dist
+                                best_idx = idx
+
+                    votes.append(best_idx)
+
+                # Majority voting: find most common prediction
+                data[row, col] = np.bincount(votes).argmax()
 
         return Frame(data=data)
 
@@ -737,7 +767,7 @@ if __name__ == "__main__":
             break
         elif key == ord('s') or key == ord('S'):
             # Send random data - switch to send_data mode and stay there
-            data = np.random.randint(0, 8, (HEIGHT, WIDTH), dtype=np.int64)
+            data = np.random.randint(0, 7, (HEIGHT, WIDTH), dtype=np.int64)
             cam.display_data = Frame(data=data)
             cam.display_mode = "send_data"
             print(f"Sending data:\n{data}")

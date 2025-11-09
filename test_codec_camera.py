@@ -44,9 +44,9 @@ def test_send_receive():
         return
 
     print("\n=== CODEC SETUP ===")
-    # Create codec for HEIGHT x WIDTH tensor with range 0-7 (matching camera's 8 colors)
-    c = codec(rows=HEIGHT, cols=WIDTH, min_val=0, max_val=7)
-    print(f"Codec: {HEIGHT}x{WIDTH} grid, range [0,7], {c.grids_needed()} grids needed")
+    # Create codec for HEIGHT x WIDTH tensor with range 0-6 (matching camera's 7 colors)
+    c = codec(rows=HEIGHT, cols=WIDTH, min_val=0, max_val=6)
+    print(f"Codec: {HEIGHT}x{WIDTH} grid, range [0,6], {c.grids_needed()} grids needed")
 
     # Create a HARDCODED HEIGHT x WIDTH FP16 tensor (same on both TX and RX)
     np.random.seed(42)  # Fixed seed for reproducibility
@@ -128,12 +128,12 @@ def send_mode(cam: Camera, grids: np.ndarray):
         current_time = time.time()
 
         if state == "idle":
-            # Show black screen, waiting for S key
+            # Show white screen, waiting for S key
             data = np.zeros((HEIGHT, WIDTH), dtype=np.int64)
 
         elif state == "start_signal":
             # Green start signal for 5 seconds
-            data = np.full((HEIGHT, WIDTH), 3, dtype=np.int64)
+            data = np.full((HEIGHT, WIDTH), 2, dtype=np.int64)
             elapsed = current_time - start_time
             if elapsed >= 5.0:
                 # Start signal done, begin transmission
@@ -151,7 +151,7 @@ def send_mode(cam: Camera, grids: np.ndarray):
                 if frame_idx >= grids.shape[0]:
                     # All grids sent, show end signal
                     state = "end_signal"
-                    data = np.full((HEIGHT, WIDTH), 3, dtype=np.int64)
+                    data = np.full((HEIGHT, WIDTH), 2, dtype=np.int64)
                     print(f"[{current_time:.2f}] Transmission complete! Showing GREEN end signal")
                     print("Press S to restart transmission")
                 else:
@@ -162,7 +162,7 @@ def send_mode(cam: Camera, grids: np.ndarray):
 
         elif state == "end_signal":
             # Hold green end signal until S is pressed again
-            data = np.full((HEIGHT, WIDTH), 3, dtype=np.int64)
+            data = np.full((HEIGHT, WIDTH), 2, dtype=np.int64)
 
         # Display current frame
         cam.display_data = Frame(data=data)
@@ -228,8 +228,8 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
             pass
 
         elif state == "waiting_for_start":
-            # Check if current frame is the green start signal (all 3s)
-            is_start_signal = np.all(current_data == 3)
+            # Check if current frame is the green start signal (all 2s)
+            is_start_signal = np.all(current_data == 2)
 
             if is_start_signal:
                 # Still in start signal - print every 30 frames (~1 second)
@@ -248,7 +248,7 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
 
         elif state == "collecting":
             # Check for green end signal first
-            is_end_signal = np.all(current_data == 3)
+            is_end_signal = np.all(current_data == 2)
 
             # Check for frame change
             if prev_frame_data is not None:
