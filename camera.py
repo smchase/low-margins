@@ -1,22 +1,33 @@
 import dataclasses
+import enum
+import time
 import numpy as np
 from numpy.typing import NDArray
 import cv2
 from typing import Optional
 
-WIDTH = 16
-HEIGHT = 16
-RANGE = 8
-COLOR_MAP = [
+ROWS = 16
+COLS = 16
+SQUARE_SIZE = 50
+PADDING = 25
+
+DATA_WIDTH = COLS * SQUARE_SIZE
+DATA_HEIGHT = ROWS * SQUARE_SIZE
+WINDOW_WIDTH = DATA_WIDTH + 2 * PADDING
+WINDOW_HEIGHT = DATA_HEIGHT + 2 * PADDING
+
+COLORS = [
     (0, 0, 0),
     (255, 255, 255),
-    (255, 0, 0),
-    (0, 255, 0),
-    (0, 0, 255),
-    (255, 255, 0),
-    (255, 0, 255),
-    (0, 255, 255),
 ]
+SECONDS_PER_FRAME = 1
+
+
+class CalibrationState(enum.Enum):
+    INSTRUCTIONS = "instructions"
+    TRANSMIT_CALIBRATION = "transmit_calibration"
+    RECEIVE_WAITING_MARKERS = "receive_waiting_markers"
+    RECEIVE_COLORS = "receive_colors"
 
 
 @dataclasses.dataclass
@@ -25,297 +36,180 @@ class Frame:
 
 
 class Camera:
-    def __init__(self, test_mode: bool = False) -> None:
-        self.test_mode = test_mode
-        self.display_size = 1552  # Display and webcam size
-        self.warp_size = 1552
-        self.locked_corners: Optional[NDArray[np.float32]] = None
+    def __init__(self) -> None:
         self.warp_matrix: Optional[NDArray[np.float32]] = None
-        self.test_camera_input: Optional[NDArray[np.uint8]] = None
-        self.calibrated_colors: Optional[NDArray[np.float32]] = None
+        self.calibrated_colors: NDArray[np.float32] = np.zeros((ROWS, COLS, len(COLORS), 3), dtype=np.float32)
+        self.curent_transmission: Optional[Frame] = None
 
-        # Calibration status
-        self.receive_calibration_done = False
-        self.transmit_calibration_done = False
+        self.cap = cv2.VideoCapture(0)
+        if not self.cap.isOpened():
+            raise RuntimeError("Could not open camera")
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
-        # Current display mode
-        self.display_mode = "instructions"  # instructions, transmit_markers, transmit_colors, receive_camera, send_data
-        self.display_data: Optional[Frame] = None
+        cv2.namedWindow('low margins', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('low margins', WINDOW_WIDTH, WINDOW_HEIGHT)
 
-        if not test_mode:
-            self.cap = cv2.VideoCapture(0)
-            if not self.cap.isOpened():
-                raise RuntimeError("Could not open camera")
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1552)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1552)
-            print(
-                f"Camera resolution: "
-                f"{int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
-                f"{int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
-            )
+    def calibrate(self) -> bool:
+        state = CalibrationState.INSTRUCTIONS
 
-        # Create unified window
-        cv2.namedWindow('Camera Data Link')
+        receive_calibration_done = False
+        transmit_calibration_done = False
+        transmit_start_time = None
 
-        # Print instructions
-        self._print_instructions()
+        receiving_color_index = 0
+        receiving_frames_stable = 0
+        receiving_prev_frame = None
 
-    def _print_instructions(self) -> None:
-        print("\n" + "="*70)
-        print("CAMERA DATA LINK - Instructions")
-        print("="*70)
-        print("\nKEYBOARD CONTROLS:")
-        print("  T - Transmit calibration (show markers + colors)")
-        print("  R - Receive calibration (detect markers + colors from other side)")
-        print("  S - Send random data (after both calibrations complete)")
-        print("  R - Receive data (after both calibrations complete)")
-        print("  Q - Quit")
-        print("\nTYPICAL FLOW (two computers):")
-        print("  1. Computer A: Press T (transmit calibration)")
-        print("  2. Computer B: Press R (receive A's calibration)")
-        print("  3. Computer B: Press T (transmit calibration)")
-        print("  4. Computer A: Press R (receive B's calibration)")
-        print("  5. Both computers have ✓✓ checkmarks")
-        print("  6. Use S to send data, R to receive data")
-        print("\nNOTE: You can press R before the other side presses T.")
-        print("      It will wait until it sees the calibration pattern.")
-        print("="*70 + "\n")
+        while True:
+            if receive_calibration_done and transmit_calibration_done:
+                print(
+                    "\n✓✓ Calibration complete! Ready for data transmission."
+                )
+                return True
 
-    def _render_instructions(self, in_data_mode: bool = False) -> NDArray[np.uint8]:
-        """Renders the instructions screen"""
-        size = self.display_size
-        img = np.ones((size, size, 3), dtype=np.uint8) * 255
+            # State machine
+            match state:
+                case CalibrationState.INSTRUCTIONS:
+                    display = self._render_instructions(
+                        receive_calibration_done, transmit_calibration_done)
+                    cv2.imshow('low margins', display)
 
-        # Title
-        cv2.putText(img, "CAMERA DATA LINK",
-                   (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.8, (0, 0, 0), 3)
+                    key = cv2.waitKey(30) & 0xFF
+                    if key == ord('t') or key == ord('T'):
+                        if not transmit_calibration_done:
+                            print("Starting transmit calibration...")
+                            state = CalibrationState.TRANSMIT_CALIBRATION
+                            transmit_start_time = time.time()
+                        else:
+                            print("Already completed transmit calibration")
+                    elif key == ord('r') or key == ord('R'):
+                        if not receive_calibration_done:
+                            print("Starting receive calibration...")
+                            print("Waiting for markers...")
+                            state = CalibrationState.RECEIVE_WAITING_MARKERS
+                        else:
+                            print("Already completed receive calibration")
 
-        y = 220
+                case CalibrationState.TRANSMIT_CALIBRATION:
+                    elapsed = time.time() - transmit_start_time
+                    if elapsed >= 2 + len(COLORS):
+                        state = CalibrationState.INSTRUCTIONS
+                        transmit_calibration_done = True
+                        print("✓ Transmit calibration complete!")
+
+                    display = self._render_transmit_calibration(elapsed)
+                    cv2.imshow('low margins', display)
+                    cv2.waitKey(30)
+
+                case CalibrationState.RECEIVE_WAITING_MARKERS:
+                    ret, webcam_frame = self.cap.read()
+                    if not ret:
+                        print("ERROR: Webcam failed to capture frame")
+                        return False
+
+                    detected = self._detect_boundary(webcam_frame)
+                    if detected is not None:
+                        dst = np.array([
+                            [0, 0],
+                            [DATA_WIDTH - 1, 0],
+                            [DATA_WIDTH - 1, DATA_HEIGHT - 1],
+                            [0, DATA_HEIGHT - 1]
+                        ], dtype=np.float32)
+                        self.warp_matrix = cv2.getPerspectiveTransform(detected, dst)
+                        state = CalibrationState.RECEIVE_COLORS
+                        print("✓ Markers detected and locked!")
+                        print("Waiting for color patterns...")
+
+                    cv2.imshow('low margins', webcam_frame)
+                    cv2.waitKey(30)
+
+                case CalibrationState.RECEIVE_COLORS:
+                    ret, webcam_frame = self.cap.read()
+                    if not ret:
+                        print("ERROR: Webcam failed to capture frame")
+                        return False
+
+                    curr_samples = self._capture_color_samples()
+
+                    if self._detect_color_change(receiving_prev_frame, curr_samples):
+                        receiving_frames_stable = 0
+                    else:
+                        receiving_frames_stable += 1
+
+                    if receiving_frames_stable == 3:
+                        self.calibrated_colors[:, :, receiving_color_index, :] = curr_samples
+                        print(f"  ✓ Captured color {receiving_color_index}")
+                        receiving_color_index += 1
+
+                        if receiving_color_index >= len(COLORS):
+                            print("✓ Receive calibration complete!")
+                            receive_calibration_done = True
+                            state = CalibrationState.INSTRUCTIONS
+
+                    receiving_prev_frame = curr_samples
+
+                    cv2.imshow('low margins', webcam_frame)
+                    cv2.waitKey(30)
+
+                case _:
+                    raise RuntimeError(
+                        f"Unexpected state during calibration: {state}")
+
+    def _render_instructions(
+            self,
+            receive_done: bool = False,
+            transmit_done: bool = False) -> NDArray[np.uint8]:
+        img = np.ones((WINDOW_HEIGHT, WINDOW_WIDTH, 3), dtype=np.uint8) * 255
+        y = 50
+
+        in_data_mode = receive_done and transmit_done
 
         if not in_data_mode:
-            # Calibration mode
-            check_rx = "[X]" if self.receive_calibration_done else "[ ]"
-            check_tx = "[X]" if self.transmit_calibration_done else "[ ]"
-
-            cv2.putText(img, "CALIBRATION STATUS:",
-                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
+            rx = "X" if receive_done else " "
+            tx = "X" if transmit_done else " "
+            cv2.putText(img, f"[{rx}] Receive  [{tx}] Transmit", (20, y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
             y += 80
-            cv2.putText(img, f"{check_rx} Receive Calibration",
-                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
-            y += 70
-            cv2.putText(img, f"{check_tx} Transmit Calibration",
-                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
-            y += 100
-
-            cv2.putText(img, "KEYBOARD CONTROLS:",
-                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
-            y += 80
-            cv2.putText(img, "T - Transmit calibration",
-                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
-            y += 60
-            cv2.putText(img, "R - Receive calibration",
-                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
-            y += 60
-            cv2.putText(img, "Q - Quit",
-                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
+            cv2.putText(img, "T - Transmit calibration", (20, y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+            y += 40
+            cv2.putText(img, "R - Receive calibration", (20, y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
         else:
-            # Data transmission mode
-            cv2.putText(img, "DATA TRANSMISSION MODE",
-                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 150, 0), 2)
-            y += 100
-
-            cv2.putText(img, "KEYBOARD CONTROLS:",
-                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
+            cv2.putText(img, "Ready for transmission", (20, y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
             y += 80
-            cv2.putText(img, "S - Send random data",
-                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
-            y += 60
-            cv2.putText(img, "R - Receive data",
-                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
-            y += 60
-            cv2.putText(img, "Q - Quit",
-                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
+            cv2.putText(img, "T - Transmit data", (20, y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+            y += 40
+            cv2.putText(img, "R - Receive data", (20, y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
 
         return img
 
-    def _render_window(self, webcam_frame: NDArray[np.uint8]) -> NDArray[np.uint8]:
-        """Renders the full window based on current display mode"""
-        # Display based on mode
-        if self.display_mode == "instructions":
-            in_data_mode = self.receive_calibration_done and self.transmit_calibration_done
-            return self._render_instructions(in_data_mode)
-        elif self.display_mode == "transmit_markers":
-            return self._render_calibration_boundary()
-        elif self.display_mode == "transmit_colors":
-            if hasattr(self, '_transmit_color_idx'):
-                return self._render_color_calibration_pattern(self._transmit_color_idx)
-            return self._render_instructions()
-        elif self.display_mode == "receive_camera":
-            # Show camera feed
-            return webcam_frame
-        elif self.display_mode == "send_data":
-            if self.display_data is not None:
-                return self._render_data(self.display_data)
-            return self._render_instructions(True)
+    def _render_transmit_calibration(self, elapsed: float) -> NDArray[np.uint8]:
+        img = np.ones((WINDOW_HEIGHT, WINDOW_WIDTH, 3), dtype=np.uint8) * 255
+
+        if elapsed < 2.0:
+            # Render markers
+            marker_size = 50
+            aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+            positions = [
+                (PADDING, PADDING),
+                (WINDOW_WIDTH - marker_size - PADDING, PADDING),
+                (WINDOW_WIDTH - marker_size - PADDING, WINDOW_HEIGHT - marker_size - PADDING),
+                (PADDING, WINDOW_HEIGHT - marker_size - PADDING),
+            ]
+            for marker_id, (x, y) in enumerate(positions):
+                marker = cv2.aruco.generateImageMarker(aruco_dict, marker_id, marker_size)
+                img[y:y+marker_size, x:x+marker_size] = cv2.cvtColor(
+                    marker, cv2.COLOR_GRAY2BGR)
         else:
-            return self._render_instructions()
-
-    def calibrate(self) -> bool:
-        """Calibration loop - handles T/R keys until both transmit and receive are complete"""
-        import time
-
-        # Start with instructions
-        self.display_mode = "instructions"
-
-        # State for receive calibration
-        rx_state = "idle"  # idle, waiting_markers, locked, receiving_colors
-        rx_prev_samples = None
-        rx_color_idx = 0
-        rx_frames_stable = 0
-
-        # State for transmit calibration
-        tx_start_time = None
-
-        while True:
-            # Get webcam frame
-            if self.test_mode:
-                if self.test_camera_input is None:
-                    webcam_frame = np.zeros((self.display_size, self.display_size, 3), dtype=np.uint8)
-                else:
-                    webcam_frame = self.test_camera_input
-            else:
-                ret, webcam_frame = self.cap.read()
-                if not ret:
-                    webcam_frame = np.zeros((self.display_size, self.display_size, 3), dtype=np.uint8)
-
-            # Handle transmit calibration timing
-            if self.display_mode == "transmit_markers":
-                elapsed = time.time() - tx_start_time
-                if elapsed >= 2.0:
-                    # Switch to colors
-                    self.display_mode = "transmit_colors"
-                    self._transmit_color_idx = 0
-            elif self.display_mode == "transmit_colors":
-                elapsed = time.time() - tx_start_time - 2.0
-                self._transmit_color_idx = min(int(elapsed), 7)
-                if elapsed >= 8.0:
-                    # Done transmitting - back to instructions
-                    self.display_mode = "instructions"
-                    self.transmit_calibration_done = True
-                    print("✓ Transmit calibration complete!")
-
-            # Handle receive calibration
-            if rx_state == "waiting_markers":
-                # Try to detect and lock markers
-                detected = self._detect_boundary(webcam_frame)
-                if detected is not None:
-                    self.locked_corners = detected
-                    dst = np.array([
-                        [0, 0],
-                        [self.warp_size - 1, 0],
-                        [self.warp_size - 1, self.warp_size - 1],
-                        [0, self.warp_size - 1]
-                    ], dtype=np.float32)
-                    self.warp_matrix = cv2.getPerspectiveTransform(
-                        self.locked_corners, dst)
-                    print("✓ Markers detected and locked!")
-                    rx_state = "locked"
-                    self.calibrated_colors = np.zeros(
-                        (HEIGHT, WIDTH, len(COLOR_MAP), 3), dtype=np.float32)
-                    rx_prev_samples = None
-                    rx_color_idx = 0
-                    rx_frames_stable = 0
-            elif rx_state == "locked":
-                # Wait for markers to disappear (transition to colors)
-                # Capture current samples and wait for a significant change
-                curr_samples = self._capture_color_samples()
-
-                if rx_prev_samples is None:
-                    rx_prev_samples = curr_samples.copy()
-                elif self._detect_color_change(rx_prev_samples, curr_samples):
-                    # Markers have disappeared! Transition to receiving colors
-                    rx_state = "receiving_colors"
-                    rx_prev_samples = curr_samples.copy()
-                    rx_frames_stable = 0
-                    print("✓ Markers disappeared, capturing color patterns...")
-                else:
-                    rx_prev_samples = curr_samples.copy()
-
-            elif rx_state == "receiving_colors":
-                curr_samples = self._capture_color_samples()
-
-                if rx_prev_samples is None:
-                    rx_frames_stable = 0
-                elif self._detect_color_change(rx_prev_samples, curr_samples):
-                    rx_frames_stable = 0
-                else:
-                    rx_frames_stable += 1
-
-                if rx_frames_stable == 3:  # STABILIZATION_FRAMES
-                    self.calibrated_colors[:, :, rx_color_idx, :] = curr_samples
-                    print(f"  ✓ Captured color {rx_color_idx}")
-                    rx_color_idx += 1
-                    rx_frames_stable = -1000
-
-                    if rx_color_idx >= 8:
-                        print("✓ Receive calibration complete!")
-                        self.receive_calibration_done = True
-                        rx_state = "idle"
-                        # Back to instructions
-                        self.display_mode = "instructions"
-
-                rx_prev_samples = curr_samples.copy()
-
-            # Check if both calibrations are complete
-            if self.receive_calibration_done and self.transmit_calibration_done:
-                print("\n✓✓ Calibration complete! Ready for data transmission.")
-                self.display_mode = "instructions"
-                return True
-
-            # Render and display
-            display = self._render_window(webcam_frame)
-            cv2.imshow('Camera Data Link', display)
-
-            # Handle keyboard input
-            key = cv2.waitKey(30) & 0xFF
-
-            if key == ord('q') or key == ord('Q'):
-                return False
-            elif key == ord('t') or key == ord('T'):
-                if not self.transmit_calibration_done:
-                    print("Starting transmit calibration...")
-                    self.display_mode = "transmit_markers"
-                    tx_start_time = time.time()
-                else:
-                    print("Already completed transmit calibration")
-            elif key == ord('r') or key == ord('R'):
-                if not self.receive_calibration_done:
-                    print("Starting receive calibration...")
-                    print("Waiting for markers...")
-                    self.display_mode = "receive_camera"
-                    rx_state = "waiting_markers"
-                else:
-                    print("Already completed receive calibration")
-
-    def _render_calibration_boundary(self) -> NDArray[np.uint8]:
-        size = self.display_size
-        marker_size = int(size * 0.15)  # 15% of display size
-        padding = int(size * 0.1)  # 10% padding
-        img = np.ones((size, size, 3), dtype=np.uint8) * 255
-        aruco_dict = cv2.aruco.getPredefinedDictionary(
-            cv2.aruco.DICT_4X4_50)
-        positions = [
-            (padding, padding),
-            (size - marker_size - padding, padding),
-            (size - marker_size - padding, size - marker_size - padding),
-            (padding, size - marker_size - padding),
-        ]
-
-        for marker_id, (x, y) in enumerate(positions):
-            marker = cv2.aruco.generateImageMarker(
-                aruco_dict, marker_id, marker_size)
-            img[y:y+marker_size, x:x+marker_size] = cv2.cvtColor(
-                marker, cv2.COLOR_GRAY2BGR)
+            # Render color pattern
+            color_idx = min(int(elapsed - 2.0), len(COLORS) - 1)
+            color = COLORS[color_idx]
+            img[PADDING:PADDING+DATA_HEIGHT, PADDING:PADDING+DATA_WIDTH] = color
 
         return img
 
@@ -330,16 +224,15 @@ class Camera:
             cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         )
 
-        if ids is None or len(ids) < 4:
+        if ids is None:
             return None
 
         marker_corners = {}
         for i, marker_id in enumerate(ids.flatten()):
-            if marker_id < 4:
-                corner_points = corners[i][0]
-                marker_corners[marker_id] = corner_points[marker_id]
+            corner_points = corners[i][0]
+            marker_corners[marker_id] = corner_points[marker_id]
 
-        if len(marker_corners) < 4:
+        if len(marker_corners) != 4:
             return None
 
         return np.array([
@@ -349,211 +242,79 @@ class Camera:
             marker_corners[3],
         ], dtype=np.float32)
 
-    def _is_calibrated(self) -> bool:
-        return (self.locked_corners is not None
-                and self.warp_matrix is not None)
-
-    def _render_color_calibration_pattern(
-            self, color_idx: int) -> NDArray[np.uint8]:
-        """Renders a full grid with all cells showing the same color."""
-        size = self.display_size
-        img = np.ones((size, size, 3), dtype=np.uint8) * 255
-
-        data_start = int(size * 0.1)  # 10% padding
-        data_size = int(size * 0.8)  # 80% for data
-
-        color = COLOR_MAP[color_idx]
-        img[data_start:data_start+data_size,
-            data_start:data_start+data_size] = color
-
-        return img
-
     def _capture_color_samples(self) -> NDArray[np.float32]:
-        """Captures BGR values for all 256 grid positions from current frame.
-        Returns array of shape (HEIGHT, WIDTH, 3)."""
-        if not self._is_calibrated():
-            return np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
-
-        if self.test_mode:
-            frame = self.test_camera_input
-        else:
-            ret, frame = self.cap.read()
-            if not ret:
-                return np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
+        ret, frame = self.cap.read()
+        if not ret:
+            raise RuntimeError("Webcam failed to capture frame")
 
         unwarped = cv2.warpPerspective(
-            frame, self.warp_matrix, (self.warp_size, self.warp_size))
+            frame, self.warp_matrix, (DATA_WIDTH, DATA_HEIGHT))
 
-        cell_size = self.warp_size / WIDTH
-        samples = np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
-
-        for row in range(HEIGHT):
-            for col in range(WIDTH):
-                y = int((row + 0.5) * cell_size)
-                x = int((col + 0.5) * cell_size)
+        samples = np.zeros((ROWS, COLS, 3), dtype=np.float32)
+        for row in range(ROWS):
+            for col in range(COLS):
+                y = int((row + 0.5) * SQUARE_SIZE)
+                x = int((col + 0.5) * SQUARE_SIZE)
                 samples[row, col] = unwarped[y, x].astype(np.float32)
 
         return samples
 
     def _detect_color_change(
             self,
-            previous_samples: NDArray[np.float32],
-            current_samples: NDArray[np.float32],
-            threshold: int = 200) -> bool:
-        """Detects if a major color change occurred across the grid.
-        Returns True if more than 'threshold' squares changed significantly."""
+            previous_samples: Optional[NDArray[np.float32]],
+            current_samples: NDArray[np.float32]) -> bool:
         if previous_samples is None:
             return False
 
-        # Calculate per-square color distance
         diff = np.sum((current_samples - previous_samples) ** 2, axis=2)
-
-        # Count how many squares changed significantly (distance > 1000)
         changed_count = np.sum(diff > 1000)
+        return changed_count > 200
 
-        return changed_count > threshold
+    def update(self) -> None:
+        if self.curent_transmission is not None:
+            img = np.ones((WINDOW_HEIGHT, WINDOW_WIDTH, 3), dtype=np.uint8) * 255
 
-    def send(self, frame: Frame) -> None:
-        """Send a frame by displaying it.
+            for row in range(ROWS):
+                for col in range(COLS):
+                    value = self.curent_transmission.data[row, col]
+                    color = COLORS[value]
+                    y1 = PADDING + row * SQUARE_SIZE
+                    y2 = PADDING + (row + 1) * SQUARE_SIZE
+                    x1 = PADDING + col * SQUARE_SIZE
+                    x2 = PADDING + (col + 1) * SQUARE_SIZE
+                    img[y1:y2, x1:x2] = color
+            display = img
+        else:
+            display = self._render_instructions(True, True)
+        cv2.imshow('low margins', display)
 
-        Sets the display state. Frame will appear on next update() call.
-        """
-        self.display_data = frame
-        self.display_mode = "send_data"
-
-    def _render_data(self, frame: Frame) -> NDArray[np.uint8]:
-        size = self.display_size
-        img = np.ones((size, size, 3), dtype=np.uint8) * 255
-
-        data_start = int(size * 0.1)  # 10% padding
-        data_size = int(size * 0.8)  # 80% for data
-
-        cell_size = data_size / WIDTH
-        for row in range(HEIGHT):
-            for col in range(WIDTH):
-                value = frame.data[row, col]
-                color = COLOR_MAP[value]
-                y1 = int(data_start + row * cell_size)
-                y2 = int(data_start + (row + 1) * cell_size)
-                x1 = int(data_start + col * cell_size)
-                x2 = int(data_start + (col + 1) * cell_size)
-                img[y1:y2, x1:x2] = color
-        return img
+    def transmit(self, frame: Frame) -> None:
+        self.curent_transmission = frame
 
     def receive(self) -> Frame:
-        if not self._is_calibrated():
-            return Frame(data=np.zeros((HEIGHT, WIDTH), dtype=np.int64))
-
-        if self.test_mode:
-            frame = self.test_camera_input
-        else:
-            ret, frame = self.cap.read()
-            if not ret:
-                return Frame(data=np.zeros((HEIGHT, WIDTH), dtype=np.int64))
+        ret, frame = self.cap.read()
+        if not ret:
+            raise RuntimeError("Webcam failed to capture frame")
 
         unwarped = cv2.warpPerspective(
-            frame, self.warp_matrix, (self.warp_size, self.warp_size))
+            frame, self.warp_matrix, (DATA_WIDTH, DATA_HEIGHT))
 
-        cell_size = self.warp_size / WIDTH
-        data = np.zeros((HEIGHT, WIDTH), dtype=np.int64)
-
-        # Use calibrated colors if available, otherwise use COLOR_MAP
-        use_calibrated = self.calibrated_colors is not None
-
-        for row in range(HEIGHT):
-            for col in range(WIDTH):
-                y = int((row + 0.5) * cell_size)
-                x = int((col + 0.5) * cell_size)
+        data = np.zeros((ROWS, COLS), dtype=np.int64)
+        for row in range(ROWS):
+            for col in range(COLS):
+                y = int((row + 0.5) * SQUARE_SIZE)
+                x = int((col + 0.5) * SQUARE_SIZE)
                 pixel = unwarped[y, x].astype(np.float32)
 
                 min_dist = float('inf')
-                best_idx = 0
+                best_color_index = 0
+                for i in range(len(COLORS)):
+                    color_ref = self.calibrated_colors[row, col, i]
+                    dist = np.sum((pixel - color_ref) ** 2)
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_color_index = i
 
-                if use_calibrated:
-                    # Compare to calibrated colors for this position
-                    for idx in range(len(COLOR_MAP)):
-                        color_ref = self.calibrated_colors[row, col, idx]
-                        dist = np.sum((pixel - color_ref) ** 2)
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_idx = idx
-                else:
-                    # Compare to ideal COLOR_MAP
-                    for idx, color in enumerate(COLOR_MAP):
-                        dist = np.sum((pixel - np.array(color)) ** 2)
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_idx = idx
-
-                data[row, col] = best_idx
+                data[row, col] = best_color_index
 
         return Frame(data=data)
-
-    def update(self) -> int:
-        """Update and display the window. Returns key pressed (or -1).
-
-        Must be called regularly to keep window responsive.
-        Returns the key code if pressed, or -1 if no key.
-        """
-        # Get webcam frame
-        if self.test_mode:
-            if self.test_camera_input is None:
-                webcam_frame = np.zeros((self.display_size, self.display_size, 3), dtype=np.uint8)
-            else:
-                webcam_frame = self.test_camera_input
-        else:
-            ret, webcam_frame = self.cap.read()
-            if not ret:
-                webcam_frame = np.zeros((self.display_size, self.display_size, 3), dtype=np.uint8)
-
-        # Render and display
-        display = self._render_window(webcam_frame)
-        cv2.imshow('Camera Data Link', display)
-
-        # Return key pressed (or -1 if none)
-        return cv2.waitKey(30) & 0xFF
-
-    def cleanup(self) -> None:
-        """Clean up resources"""
-        cv2.destroyAllWindows()
-        if not self.test_mode:
-            self.cap.release()
-
-
-if __name__ == "__main__":
-    cam = Camera(test_mode=False)
-
-    # Run calibration (blocks until complete)
-    if not cam.calibrate():
-        print("Calibration cancelled")
-        cam.cleanup()
-        exit(0)
-
-    # Data transmission mode
-    print("\nData transmission mode active!")
-    print("Press 'S' to send random data")
-    print("Press 'R' to receive data")
-    print("Press 'Q' to quit")
-
-    # Event loop with continuous update() calls
-    # The Camera class only handles keyboard for calibration
-    # This harness handles keyboard for send/receive
-    while True:
-        key = cam.update()
-
-        if key == ord('q') or key == ord('Q'):
-            break
-        elif key == ord('s') or key == ord('S'):
-            # Send random data
-            data = np.random.randint(0, 8, (HEIGHT, WIDTH), dtype=np.int64)
-            frame = Frame(data=data)
-            cam.send(frame)
-            print(f"Sent data:\n{data}")
-        elif key == ord('r') or key == ord('R'):
-            # Receive data
-            received = cam.receive()
-            print(f"Received data:\n{received.data}")
-
-    # Cleanup
-    print("\nShutting down...")
-    cam.cleanup()
