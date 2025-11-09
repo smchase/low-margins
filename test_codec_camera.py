@@ -197,13 +197,20 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
     else:
         print("✓ Using calibrated colors for decoding")
 
-    print("Press SPACE to start waiting for GREEN start signal, Q to quit")
-
+    total_cells = HEIGHT * WIDTH
     collected_grids = []
     prev_frame_data = None
     frames_stable = 0
     STABILITY_THRESHOLD = 3  # Need 3 stable frames before capturing
-    CHANGE_THRESHOLD = 50  # Number of cells that must differ to detect change
+    CHANGE_THRESHOLD = max(50, int(0.05 * total_cells))  # require >=5% cells to change
+    FRAME_INTERVAL = 0.5  # 2fps source
+    MIN_CAPTURE_DELAY = FRAME_INTERVAL  # seconds to wait after change before capturing
+    next_capture_time = 0.0
+
+    print("Press SPACE to start waiting for GREEN start signal, Q to quit")
+    print(f"- Change threshold: {CHANGE_THRESHOLD} cells (~{CHANGE_THRESHOLD / total_cells * 100:.1f}% of grid)")
+    print(f"- Capture requires ≥{STABILITY_THRESHOLD} stable frames "
+          f"and {MIN_CAPTURE_DELAY:.2f}s since the last change")
 
     # State machine: idle -> waiting_for_start -> collecting -> done
     state = "idle"
@@ -264,6 +271,7 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                     else:
                         # Regular frame change
                         frames_stable = 0
+                        next_capture_time = time.time() + MIN_CAPTURE_DELAY
                         unique, counts = np.unique(current_data, return_counts=True)
                         color_dist = dict(zip(unique, counts))
                         print(f"[CHANGE DETECTED] {diff_count} cells changed, colors: {color_dist}")
@@ -272,7 +280,11 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                     frames_stable += 1
 
                     # If stable enough and not end signal, capture it
-                    if frames_stable == STABILITY_THRESHOLD and not is_end_signal:
+                    if (
+                        frames_stable >= STABILITY_THRESHOLD
+                        and not is_end_signal
+                        and time.time() >= next_capture_time
+                    ):
                         collected_grids.append(current_data.copy())
                         print(f"✓ Captured grid {len(collected_grids)}/{c.grids_needed()}")
                         print(f"  Stats: min={current_data.min()}, max={current_data.max()}, unique={len(np.unique(current_data))}")
