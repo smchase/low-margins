@@ -65,18 +65,20 @@ class NetworkCommunicator:
         self.grad_server_socket.listen(num_workers)
         print(f"Root: Listening for gradient connections on port {self.grad_port}")
         
-        # Accept gradient connections from all workers
-        for i in range(num_workers):
-            conn, addr = self.grad_server_socket.accept()
-            self.grad_connections.append(conn)
-            print(f"Root: Worker {i+1}/{num_workers} connected for gradients from {addr}")
-        
         # Set up parameter server (sends to workers)
         self.param_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.param_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.param_server_socket.bind(('0.0.0.0', self.param_port))
         self.param_server_socket.listen(num_workers)
         print(f"Root: Listening for parameter connections on port {self.param_port}")
+        
+        print(f"Root: Both servers listening, waiting for {num_workers} workers to connect...")
+        
+        # Accept gradient connections from all workers
+        for i in range(num_workers):
+            conn, addr = self.grad_server_socket.accept()
+            self.grad_connections.append(conn)
+            print(f"Root: Worker {i+1}/{num_workers} connected for gradients from {addr}")
         
         # Accept parameter connections from all workers
         for i in range(num_workers):
