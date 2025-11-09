@@ -32,6 +32,8 @@ class Camera:
         self.display_width = int(self.display_height * WIDTH / HEIGHT)
         self.warp_height = 1552
         self.warp_width = int(self.warp_height * WIDTH / HEIGHT)
+        self.capture_height = self.display_height
+        self.capture_width = self.display_width
         self.locked_corners: Optional[NDArray[np.float32]] = None
         self.warp_matrix: Optional[NDArray[np.float32]] = None
         self.test_camera_input: Optional[NDArray[np.uint8]] = None
@@ -44,6 +46,7 @@ class Camera:
         # Current display mode
         self.display_mode = "idle"  # idle, transmit_markers, transmit_colors, send_data
         self.display_data: Optional[Frame] = None
+        self.debug_grid_overlay = False
 
         if not test_mode:
             self.cap = cv2.VideoCapture(0)
@@ -51,10 +54,11 @@ class Camera:
                 raise RuntimeError("Could not open camera")
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.display_width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.display_height)
+            self.capture_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.capture_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             print(
                 f"Camera resolution: "
-                f"{int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
-                f"{int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
+                f"{self.capture_width}x{self.capture_height}"
             )
 
         # Print instructions
@@ -155,10 +159,7 @@ class Camera:
                 return self._render_color_calibration_pattern(self._transmit_color_idx)
             return self._render_instructions()
         elif self.display_mode == "receive_camera":
-            # Show camera feed scaled to display size for consistency
-            if (webcam_frame.shape[1] != self.display_width or
-                    webcam_frame.shape[0] != self.display_height):
-                return cv2.resize(webcam_frame, (self.display_width, self.display_height))
+            # Show camera feed with native camera resolution (no stretching)
             return webcam_frame
         elif self.display_mode == "send_data":
             if self.display_data is not None:
@@ -187,13 +188,16 @@ class Camera:
             # Get webcam frame
             if self.test_mode:
                 if self.test_camera_input is None:
-                    webcam_frame = np.zeros((self.display_height, self.display_width, 3), dtype=np.uint8)
+                    webcam_frame = self._blank_capture_frame()
                 else:
                     webcam_frame = self.test_camera_input
+                    self._update_capture_dimensions(webcam_frame)
             else:
                 ret, webcam_frame = self.cap.read()
                 if not ret:
-                    webcam_frame = np.zeros((self.display_height, self.display_width, 3), dtype=np.uint8)
+                    webcam_frame = self._blank_capture_frame()
+                else:
+                    self._update_capture_dimensions(webcam_frame)
 
             # Handle transmit calibration timing
             if self.display_mode == "transmit_markers":
@@ -415,6 +419,34 @@ class Camera:
         pad_x = max(0, int(round((self.display_width - data_width) / 2)))
         return pad_x, pad_y, cell_size, data_width, data_height
 
+    def _blank_capture_frame(self) -> NDArray[np.uint8]:
+        return np.zeros((self.capture_height, self.capture_width, 3), dtype=np.uint8)
+
+    def _update_capture_dimensions(self, frame: NDArray[np.uint8]) -> None:
+        if frame is None:
+            return
+        height, width = frame.shape[:2]
+        if height > 0 and width > 0:
+            self.capture_height = height
+            self.capture_width = width
+
+    def _draw_sampling_overlay(self, img: NDArray[np.uint8]) -> None:
+        """Draws grid lines showing sampling positions."""
+        x_start, y_start, cell_size, data_width, data_height = self._compute_data_layout()
+        x_end = min(self.display_width, int(round(x_start + data_width)))
+        y_end = min(self.display_height, int(round(y_start + data_height)))
+        color = (50, 50, 50)
+
+        for row in range(HEIGHT + 1):
+            y = int(round(y_start + row * cell_size))
+            if 0 <= y < self.display_height:
+                cv2.line(img, (int(x_start), y), (x_end, y), color, 1)
+
+        for col in range(WIDTH + 1):
+            x = int(round(x_start + col * cell_size))
+            if 0 <= x < self.display_width:
+                cv2.line(img, (x, int(y_start)), (x, y_end), color, 1)
+
     def _render_color_calibration_pattern(
             self, color_idx: int) -> NDArray[np.uint8]:
         """Renders a full grid with all cells showing the same color."""
@@ -439,10 +471,14 @@ class Camera:
 
         if self.test_mode:
             frame = self.test_camera_input
+            if frame is None:
+                return np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
+            self._update_capture_dimensions(frame)
         else:
             ret, frame = self.cap.read()
             if not ret:
                 return np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
+            self._update_capture_dimensions(frame)
 
         unwarped = cv2.warpPerspective(
             frame, self.warp_matrix, (self.warp_width, self.warp_height))
@@ -541,6 +577,8 @@ class Camera:
                 x1 = min(self.display_width, int(round(x_start + col * cell_size)))
                 x2 = min(self.display_width, int(round(x_start + (col + 1) * cell_size)))
                 img[y1:y2, x1:x2] = color
+        if self.debug_grid_overlay:
+            self._draw_sampling_overlay(img)
         return img
 
     def receive(self) -> Frame:
@@ -549,10 +587,13 @@ class Camera:
 
         if self.test_mode:
             frame = self.test_camera_input
+            if frame is not None:
+                self._update_capture_dimensions(frame)
         else:
             ret, frame = self.cap.read()
             if not ret:
                 return Frame(data=np.zeros((HEIGHT, WIDTH), dtype=np.int64))
+            self._update_capture_dimensions(frame)
 
         unwarped = cv2.warpPerspective(
             frame, self.warp_matrix, (self.warp_width, self.warp_height))
@@ -615,7 +656,9 @@ if __name__ == "__main__":
         # Get webcam frame
         ret, webcam_frame = cam.cap.read()
         if not ret:
-            webcam_frame = np.zeros((cam.display_height, cam.display_width, 3), dtype=np.uint8)
+            webcam_frame = cam._blank_capture_frame()
+        else:
+            cam._update_capture_dimensions(webcam_frame)
 
         # Render and display
         display = cam._render_window(webcam_frame)

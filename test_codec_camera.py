@@ -72,9 +72,9 @@ def test_send_receive():
         if not cam.test_mode:
             ret, webcam_frame = cam.cap.read()
             if not ret:
-                webcam_frame = np.zeros((cam.display_height, cam.display_width, 3), dtype=np.uint8)
+                webcam_frame = cam._blank_capture_frame()
         else:
-            webcam_frame = np.zeros((cam.display_height, cam.display_width, 3), dtype=np.uint8)
+            webcam_frame = cam._blank_capture_frame()
 
         display = cam._render_window(webcam_frame)
         cv2.imshow('Camera Data Link', display)
@@ -356,9 +356,9 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
         if not cam.test_mode:
             ret, webcam_frame = cam.cap.read()
             if not ret:
-                webcam_frame = np.zeros((cam.display_height, cam.display_width, 3), dtype=np.uint8)
+                webcam_frame = cam._blank_capture_frame()
         else:
-            webcam_frame = np.zeros((cam.display_height, cam.display_width, 3), dtype=np.uint8)
+            webcam_frame = cam._blank_capture_frame()
 
         display = cam._render_window(webcam_frame)
         cv2.imshow('Camera Data Link', display)
@@ -376,6 +376,10 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                 frames_stable = 0
                 prev_frame_data = None
                 print("\n[WAITING] Looking for GREEN start signal...")
+        elif key == ord('d') or key == ord('D'):
+            cam.debug_grid_overlay = not cam.debug_grid_overlay
+            status = "ON" if cam.debug_grid_overlay else "OFF"
+            print(f"[DEBUG] Sampling grid overlay {status}")
 
 
 if __name__ == "__main__":
