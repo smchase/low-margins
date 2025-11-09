@@ -53,7 +53,7 @@ if __name__ == "__main__":
     # We're at a 5-second boundary - record start time
     start_time = time.time()
     print(f"GO! Starting reception at t={start_time:.3f} (unix second {int(start_time)})")
-    print(f"Will receive at midpoint of each frame period")
+    print(f"Will receive at 1/4 point of each frame period")
 
     frame_number = 0
 
@@ -67,8 +67,8 @@ if __name__ == "__main__":
         cam.update()
 
         elapsed = time.time() - start_time
-        # Receive at the midpoint of each frame period
-        target_time = (frame_number + 0.5) * SECONDS_PER_FRAME
+        # Receive at 1/4 of the way through each frame period
+        target_time = (frame_number + 0.25) * SECONDS_PER_FRAME
 
         # Receive when we've reached or passed the target time for this frame
         if elapsed >= target_time:
