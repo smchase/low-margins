@@ -26,7 +26,7 @@ COLORS = [
     (255, 255, 0),   # 110 - yellow
     (255, 255, 255), # 111 - white
 ]
-SECONDS_PER_FRAME = 0.5
+SECONDS_PER_FRAME = 0.15
 
 
 class CalibrationState(enum.Enum):
@@ -229,7 +229,10 @@ class Camera:
             # marker 1 (top-right): use top-right corner [1]
             # marker 2 (bottom-right): use bottom-right corner [2]
             # marker 3 (bottom-left): use bottom-left corner [3]
-            marker_corners[marker_id] = corner_points[marker_id]
+            if 0 <= marker_id <= 3:
+                marker_corners[marker_id] = corner_points[marker_id]
+            else:
+                return None
 
         return np.array([
             marker_corners[0],
