@@ -223,16 +223,13 @@ class Camera:
             cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         )
 
-        if ids is None:
+        if ids is None or len(ids) != 4:
             return None
 
         marker_corners = {}
         for i, marker_id in enumerate(ids.flatten()):
             corner_points = corners[i][0]
             marker_corners[marker_id] = corner_points[marker_id]
-
-        if len(marker_corners) != 4:
-            return None
 
         return np.array([
             marker_corners[0],
