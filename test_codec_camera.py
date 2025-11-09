@@ -43,22 +43,30 @@ def test_send_receive():
     # Wait for mode selection
     mode = None
     while mode is None:
+        # Show instructions
+        cam.display_mode = "instructions"
+        if not cam.test_mode:
+            ret, webcam_frame = cam.cap.read()
+            if not ret:
+                webcam_frame = np.zeros((cam.display_size, cam.display_size, 3), dtype=np.uint8)
+        else:
+            webcam_frame = np.zeros((cam.display_size, cam.display_size, 3), dtype=np.uint8)
+
+        display = cam._render_window(webcam_frame)
+        cv2.imshow('Camera Data Link', display)
+
         key = cv2.waitKey(30) & 0xFF
         if key == ord('s') or key == ord('S'):
             mode = 'send'
+            print("Selected SEND mode")
         elif key == ord('r') or key == ord('R'):
             mode = 'receive'
+            print("Selected RECEIVE mode")
         elif key == ord('q') or key == ord('Q'):
             cv2.destroyAllWindows()
-            cam.cap.release()
+            if not cam.test_mode:
+                cam.cap.release()
             return
-
-        # Show instructions
-        cam.display_mode = "instructions"
-        ret, webcam_frame = cam.cap.read()
-        if ret:
-            display = cam._render_window(webcam_frame)
-            cv2.imshow('Camera Data Link', display)
 
     if mode == 'send':
         send_mode(cam, grids)
@@ -82,6 +90,9 @@ def send_mode(cam: Camera, grids: np.ndarray):
     frame_interval = 0.5  # 2fps = 0.5 seconds per frame
     frame_idx = -1  # Start with -1 for empty frame
     last_frame_time = time.time()
+
+    # Initialize with empty frame
+    data = np.ones((HEIGHT, WIDTH), dtype=np.int64)
 
     while True:
         current_time = time.time()
@@ -122,7 +133,7 @@ def receive_mode(cam: Camera, c: codec):
     print("\n=== RECEIVE MODE ===")
     print(f"Expecting {c.grids_needed()} grids")
     print("Continuously monitoring for frame changes...")
-    print("Press Q to quit, SPACE to start/restart collection")
+    print("Press SPACE to start/restart collection, Q to quit")
 
     collected_grids = []
     prev_frame_data = None
@@ -136,8 +147,8 @@ def receive_mode(cam: Camera, c: codec):
         received = cam.receive()
         current_data = received.data
 
-        # Check for frame change
-        if prev_frame_data is not None:
+        # Check for frame change if collecting
+        if collecting and prev_frame_data is not None:
             diff_count = np.sum(current_data != prev_frame_data)
 
             if diff_count > CHANGE_THRESHOLD:
@@ -149,7 +160,7 @@ def receive_mode(cam: Camera, c: codec):
                 frames_stable += 1
 
                 # If stable enough and collecting, capture it
-                if frames_stable == STABILITY_THRESHOLD and collecting:
+                if frames_stable == STABILITY_THRESHOLD:
                     # Check if this is not the empty frame (all ones)
                     if not np.all(current_data == 1):
                         collected_grids.append(current_data.copy())
@@ -173,8 +184,11 @@ def receive_mode(cam: Camera, c: codec):
                                 print(f"✗ Decode failed: {e}")
                                 collected_grids = []
                                 collecting = False
+                        # Reset stable counter after successful capture
+                        frames_stable = 0
                     else:
                         print(f"[SKIPPED] Empty frame detected (all green)")
+                        frames_stable = 0
 
         prev_frame_data = current_data.copy()
 
@@ -182,14 +196,20 @@ def receive_mode(cam: Camera, c: codec):
         cam.display_data = Frame(data=current_data)
         cam.display_mode = "send_data"
 
-        ret, webcam_frame = cam.cap.read()
-        if ret:
-            display = cam._render_window(webcam_frame)
-            cv2.imshow('Camera Data Link', display)
+        if not cam.test_mode:
+            ret, webcam_frame = cam.cap.read()
+            if not ret:
+                webcam_frame = np.zeros((cam.display_size, cam.display_size, 3), dtype=np.uint8)
+        else:
+            webcam_frame = np.zeros((cam.display_size, cam.display_size, 3), dtype=np.uint8)
+
+        display = cam._render_window(webcam_frame)
+        cv2.imshow('Camera Data Link', display)
 
         # Handle keyboard
         key = cv2.waitKey(30) & 0xFF
         if key == ord('q') or key == ord('Q'):
+            print("\nQuitting receive mode...")
             break
         elif key == ord(' '):
             # Start/restart collection
