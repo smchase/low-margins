@@ -5,16 +5,20 @@ Workflow:
 1. Both computers: Complete calibration (T to transmit, R to receive)
 2. Sender: Press S for send mode
    - Shows GREEN start signal for 5 seconds
-   - Then cycles through encoded grids at 2fps
+   - Sends encoded grids at 2fps (one pass only)
+   - Shows GREEN end signal when done
+   - Press S again to restart transmission
 3. Receiver: Press R for receive mode, then SPACE to start
    - Waits for GREEN start signal
    - Detects when start signal changes
    - Collects all grids automatically
+   - Stops when GREEN end signal detected
    - Decodes and compares with expected tensor
    - Shows diff report (perfect match or error details)
+   - Press SPACE again to restart collection
 
 Note: Both TX and RX use the same hardcoded tensor (seed=42) for verification.
-Grid size: 64x64 pixels
+Grid size: 32x32 pixels
 """
 import numpy as np
 import cv2
@@ -101,47 +105,63 @@ def test_send_receive():
 def send_mode(cam: Camera, grids: np.ndarray):
     """
     Sender: Display frames at 2fps.
-    Sequence: green start signal (5s) -> grid[0] -> grid[1] -> ... -> grid[D-1] -> repeat
+    Sequence: green start signal (5s) -> grid[0] -> grid[1] -> ... -> grid[D-1] -> green end signal (hold)
+    Press S to restart transmission.
     """
     print("\n=== SEND MODE ===")
     print(f"Sending {grids.shape[0]} grids at 2fps (0.5s per frame)")
-    print("Starting with 5-second GREEN start signal...")
-    print("Press Q to quit")
+    print("Press S to start/restart transmission, Q to quit")
 
-    start_time = time.time()
     frame_interval = 0.5  # 2fps = 0.5 seconds per frame
-    frame_idx = -1  # Will be set after start signal
-    last_frame_time = None
-    in_start_signal = True
 
-    # Initialize with green start signal (index 3 = green)
-    data = np.full((HEIGHT, WIDTH), 3, dtype=np.int64)
+    # State: idle, start_signal, transmitting, end_signal
+    state = "idle"
+    start_time = None
+    frame_idx = 0
+    last_frame_time = None
+
+    # Initialize with idle (black screen)
+    data = np.zeros((HEIGHT, WIDTH), dtype=np.int64)
 
     while True:
         current_time = time.time()
 
-        # Handle start signal period (5 seconds of green)
-        if in_start_signal:
+        if state == "idle":
+            # Show black screen, waiting for S key
+            data = np.zeros((HEIGHT, WIDTH), dtype=np.int64)
+
+        elif state == "start_signal":
+            # Green start signal for 5 seconds
+            data = np.full((HEIGHT, WIDTH), 3, dtype=np.int64)
             elapsed = current_time - start_time
             if elapsed >= 5.0:
                 # Start signal done, begin transmission
-                in_start_signal = False
+                state = "transmitting"
                 last_frame_time = current_time
                 frame_idx = 0
                 print(f"[{current_time:.2f}] Start signal complete, beginning transmission...")
                 data = grids[frame_idx].astype(np.int64)
                 print(f"[{current_time:.2f}] Showing grid {frame_idx}/{grids.shape[0]-1}")
-        else:
+
+        elif state == "transmitting":
             # Check if it's time for next frame
             if current_time - last_frame_time >= frame_interval:
                 frame_idx += 1
                 if frame_idx >= grids.shape[0]:
-                    frame_idx = 0  # Loop back to first grid
-                last_frame_time = current_time
+                    # All grids sent, show end signal
+                    state = "end_signal"
+                    data = np.full((HEIGHT, WIDTH), 3, dtype=np.int64)
+                    print(f"[{current_time:.2f}] Transmission complete! Showing GREEN end signal")
+                    print("Press S to restart transmission")
+                else:
+                    # Show next grid
+                    last_frame_time = current_time
+                    data = grids[frame_idx].astype(np.int64)
+                    print(f"[{current_time:.2f}] Showing grid {frame_idx}/{grids.shape[0]-1}")
 
-                # Show codec grid
-                print(f"[{current_time:.2f}] Showing grid {frame_idx}/{grids.shape[0]-1}")
-                data = grids[frame_idx].astype(np.int64)
+        elif state == "end_signal":
+            # Hold green end signal until S is pressed again
+            data = np.full((HEIGHT, WIDTH), 3, dtype=np.int64)
 
         # Display current frame
         cam.display_data = Frame(data=data)
@@ -153,6 +173,12 @@ def send_mode(cam: Camera, grids: np.ndarray):
         key = cv2.waitKey(30) & 0xFF
         if key == ord('q') or key == ord('Q'):
             break
+        elif key == ord('s') or key == ord('S'):
+            # Start/restart transmission
+            state = "start_signal"
+            start_time = current_time
+            frame_idx = 0
+            print(f"\n[{current_time:.2f}] Starting transmission with GREEN start signal...")
 
 
 def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
@@ -213,22 +239,40 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                 prev_frame_data = current_data.copy()
 
         elif state == "collecting":
+            # Check for green end signal first
+            is_end_signal = np.all(current_data == 3)
+
             # Check for frame change
             if prev_frame_data is not None:
                 diff_count = np.sum(current_data != prev_frame_data)
 
                 if diff_count > CHANGE_THRESHOLD:
-                    # Major change detected - new frame incoming
-                    frames_stable = 0
-                    unique, counts = np.unique(current_data, return_counts=True)
-                    color_dist = dict(zip(unique, counts))
-                    print(f"[CHANGE DETECTED] {diff_count} cells changed, colors: {color_dist}")
+                    # Major change detected
+                    if is_end_signal:
+                        # Green end signal detected!
+                        print(f"[END SIGNAL DETECTED] Stopping collection")
+                        # Check if we have enough grids
+                        if len(collected_grids) == c.grids_needed():
+                            # Proceed to decode
+                            pass
+                        else:
+                            print(f"✗ Only collected {len(collected_grids)}/{c.grids_needed()} grids before end signal")
+                            print("Press SPACE to try again")
+                            state = "idle"
+                            collected_grids = []
+                            continue
+                    else:
+                        # Regular frame change
+                        frames_stable = 0
+                        unique, counts = np.unique(current_data, return_counts=True)
+                        color_dist = dict(zip(unique, counts))
+                        print(f"[CHANGE DETECTED] {diff_count} cells changed, colors: {color_dist}")
                 else:
                     # Frame is stable
                     frames_stable += 1
 
-                    # If stable enough, capture it
-                    if frames_stable == STABILITY_THRESHOLD:
+                    # If stable enough and not end signal, capture it
+                    if frames_stable == STABILITY_THRESHOLD and not is_end_signal:
                         collected_grids.append(current_data.copy())
                         print(f"✓ Captured grid {len(collected_grids)}/{c.grids_needed()}")
                         print(f"  Stats: min={current_data.min()}, max={current_data.max()}, unique={len(np.unique(current_data))}")

@@ -4,8 +4,8 @@ from numpy.typing import NDArray
 import cv2
 from typing import Optional
 
-WIDTH = 64
-HEIGHT = 64
+WIDTH = 32
+HEIGHT = 32
 RANGE = 8
 COLOR_MAP = [
     (0, 0, 0),
