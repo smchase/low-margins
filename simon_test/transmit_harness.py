@@ -64,5 +64,13 @@ if __name__ == "__main__":
     
     if current_test_idx >= len(test_cases):
         print(f"\n✓ All {len(test_cases)} test cases transmitted!")
-        print("Keep window open until receiver confirms all cases received...") 
+        print("Waiting 2 seconds for receiver to capture last frame...")
+        
+        # Wait 2 seconds while keeping the last frame displayed
+        end_time = time.time() + 2
+        while time.time() < end_time:
+            cam.update()
+            cv2.waitKey(30)
+        
+        print("Done!") 
 
