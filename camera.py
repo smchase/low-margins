@@ -162,29 +162,16 @@ class Camera:
         img = np.ones((WINDOW_HEIGHT, WINDOW_WIDTH, 3), dtype=np.uint8) * 255
         y = 50
 
-        in_data_mode = receive_done and transmit_done
-
-        if not in_data_mode:
-            rx = "X" if receive_done else " "
-            tx = "X" if transmit_done else " "
-            cv2.putText(img, f"[{rx}] Receive  [{tx}] Transmit", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
-            y += 80
-            cv2.putText(img, "T - Transmit calibration", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-            y += 40
-            cv2.putText(img, "R - Receive calibration", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-        else:
-            cv2.putText(img, "Ready for transmission", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
-            y += 80
-            cv2.putText(img, "T - Transmit data", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-            y += 40
-            cv2.putText(img, "R - Receive data", (20, y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-
+        rx = "X" if receive_done else " "
+        tx = "X" if transmit_done else " "
+        cv2.putText(img, f"[{rx}] Receive  [{tx}] Transmit", (20, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1)
+        y += 80
+        cv2.putText(img, "T - Transmit calibration", (20, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+        y += 40
+        cv2.putText(img, "R - Receive calibration", (20, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
         return img
 
     def _render_transmit_calibration(self, elapsed: float) -> NDArray[np.uint8]:
