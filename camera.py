@@ -30,9 +30,10 @@ class Camera:
         # Display dimensions - 2:1 aspect ratio to match 64:32 grid
         self.display_width = 3104  # 2x base size for 2:1 ratio
         self.display_height = 1552  # base size
-        # Warp dimensions match display
-        self.warp_width = 3104
-        self.warp_height = 1552
+        # Warp dimensions should match DATA AREA size (80% of display)
+        # This ensures perspective transform doesn't introduce scaling artifacts
+        self.warp_width = int(self.display_width * 0.8)  # 2483
+        self.warp_height = int(self.display_height * 0.8)  # 1241
         self.locked_corners: Optional[NDArray[np.float32]] = None
         self.warp_matrix: Optional[NDArray[np.float32]] = None
         self.test_camera_input: Optional[NDArray[np.uint8]] = None
