@@ -157,10 +157,10 @@ class codec:
 
 # ---------------- Example ----------------
 if __name__ == "__main__":
-    # Example: 4x3 tensor, store digits in range [0, 255] -> K=256 -> D=2 grids
+    # Example: 4x3 tensor with 5-color encoding [0-4] -> K=5 -> D=7 grids
     rows, cols = 4, 3
-    c = codec(rows, cols, min_val=0, max_val=15)
-    print("K =", c.K, "grids_needed =", c.grids_needed())  # K=256, D=2
+    c = codec(rows, cols, min_val=0, max_val=4)
+    print("K =", c.K, "grids_needed =", c.grids_needed())  # K=5, D=7
 
     x = (np.arange(rows * cols, dtype=np.float16).reshape(rows, cols) / 7.0).astype(
         np.float16
@@ -169,9 +169,13 @@ if __name__ == "__main__":
     grids = c.encode(x)
     x2 = c.decode(grids)
 
+    print("Original tensor:")
+    print(x)
+    print("\nEncoded grids (7 grids with values 0-4):")
     print(grids)
+    print("\nDecoded tensor:")
     print(x2)
 
     # Bit-exact check:
     ok = c.roundtrip_equal(x)
-    print("roundtrip ok:", ok)
+    print("\nRoundtrip ok:", ok)

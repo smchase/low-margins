@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-Visual Data Link - Simple version
+Visual Data Link - 5-Color System
 Fixed message transmission between two MacBooks facing each other
+
+Uses 5 distinct colors (White, Black, Red, Blue, Green) for codec transmission.
+- Each color represents a value 0-4
+- FP16 tensors encoded into 7 grids (vs 4 grids with 8-color system)
+- Simpler, more reliable color detection
+- No phase splitting - direct color-to-value mapping
 """
 
 import argparse
@@ -13,12 +19,15 @@ import cv2
 import numpy as np
 
 from codec import codec
-from codec_composite_camera import COLORS_8
 from config import (
     VISUAL_GRID_SIZE,
     TRANSMISSION_FPS,
     TEST_TENSOR_ROWS,
     TEST_TENSOR_COLS,
+    COLORS_5,
+    COLOR_NAMES,
+    CODEC_MIN_VAL,
+    CODEC_MAX_VAL,
 )
 
 class Receiver:
@@ -319,7 +328,7 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05,
         samples.append(row_samples)
 
     samples = np.array(samples, dtype=np.float32)
-    palette = COLORS_8.astype(np.float32)
+    palette = COLORS_5.astype(np.float32)
     diff = samples[:, :, None, :] - palette[None, None, :, :]
     dist = np.sum(diff * diff, axis=-1)
     color_indices = np.argmin(dist, axis=2).astype(np.uint8)
@@ -336,12 +345,10 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05,
 
 def print_color_sampling_debug(samples, color_indices, expected_indices=None):
     """Print debug info about color sampling quality."""
-    from codec_composite_camera import COLORS_8
-
     print("\n[COLOR DEBUG] Sampled RGB vs Palette Colors:")
-    print("Palette reference:")
-    for idx, color in enumerate(COLORS_8):
-        print(f"  {idx}: RGB{tuple(color)} (B={color[0]}, G={color[1]}, R={color[2]})")
+    print("Palette reference (5-color system):")
+    for idx, (color, name) in enumerate(zip(COLORS_5, COLOR_NAMES)):
+        print(f"  {idx}: {name:6s} RGB{tuple(color)} (B={color[0]}, G={color[1]}, R={color[2]})")
 
     print("\nFirst few sampled cells:")
     flat_samples = samples.reshape(-1, 3)
@@ -352,7 +359,8 @@ def print_color_sampling_debug(samples, color_indices, expected_indices=None):
     for i in range(min(16, len(flat_samples))):
         sample_rgb = flat_samples[i]
         matched_idx = flat_indices[i]
-        palette_rgb = COLORS_8[matched_idx]
+        palette_rgb = COLORS_5[matched_idx]
+        color_name = COLOR_NAMES[matched_idx]
         distance = np.sqrt(np.sum((sample_rgb - palette_rgb) ** 2))
 
         status = "✓"
@@ -360,7 +368,7 @@ def print_color_sampling_debug(samples, color_indices, expected_indices=None):
             status = f"✗ (expected {flat_expected[i]})"
 
         print(f"  Cell {i}: Sampled RGB({sample_rgb[0]:.1f},{sample_rgb[1]:.1f},{sample_rgb[2]:.1f}) "
-              f"→ matched palette {matched_idx} RGB{tuple(palette_rgb)} "
+              f"→ matched palette {matched_idx}:{color_name} RGB{tuple(palette_rgb)} "
               f"(dist={distance:.1f}) {status}")
 
 
@@ -372,15 +380,16 @@ def is_calibration_pattern(color_indices):
     if uniques.size == 0:
         return True
     
+    # In 5-color system: 0=White, 1=Black
     # Only consider it calibration if it's strictly black/white AND has a specific pattern
-    if set(uniques) == {0, 7}:  # Only black and white
+    if set(uniques) == {0, 1}:  # Only white and black
         # Check if it's a checkerboard pattern
         rows, cols = color_indices.shape
         is_checkerboard = True
         for i in range(rows):
             for j in range(cols):
-                expected = 7 if (i + j) % 2 == 0 else 0
-                if color_indices[i, j] != expected and color_indices[i, j] != (7 - expected):
+                expected = 0 if (i + j) % 2 == 0 else 1
+                if color_indices[i, j] != expected and color_indices[i, j] != (1 - expected):
                     is_checkerboard = False
                     break
             if not is_checkerboard:
@@ -388,15 +397,15 @@ def is_calibration_pattern(color_indices):
         return is_checkerboard
     
     # All one color patterns during calibration are only black or white
-    if len(uniques) == 1 and uniques[0] in [0, 7]:
-        # But during data transmission, we might have all-black frames that are valid data
+    if len(uniques) == 1 and uniques[0] in [0, 1]:
+        # But during data transmission, we might have all-black or all-white frames that are valid data
         # So we can't just reject all single-color frames
         return False  # Consider single-color frames as data, not calibration
     
     return False
 
 
-START_SIGNAL_COLOR_INDEX = 2  # Green in COLORS_8 palette
+START_SIGNAL_COLOR_INDEX = 4  # Green in COLORS_5 palette
 
 
 def is_start_signal(color_indices, min_ratio=0.95):
@@ -416,29 +425,10 @@ def count_changed_cells(a, b):
 
 
 def classify_frame_phase(pattern):
-    """Return 'lower' for multi-color frames, 'upper' for binary frames."""
-    if pattern is None:
-        return None
-
-    total = pattern.size
-    if total == 0:
-        return None
-
-    max_val = pattern.max()
-    unique_vals = np.unique(pattern)
-    
-    # Upper phase should only have values 0 or 1
-    # But due to camera noise, we might see some other values
-    # Check if it's mostly 0s and 1s
-    if max_val <= 1 and len(unique_vals) <= 2:
-        return "upper"
-    
-    # Also check if vast majority are 0 or 1 (allowing for some noise)
-    binary_count = np.sum((pattern == 0) | (pattern == 1))
-    if binary_count >= pattern.size * 0.9:  # 90% or more are 0 or 1
-        return "upper"
-        
-    return "lower"
+    """With 5-color system, no phases - all frames are direct color mappings."""
+    # This function is kept for compatibility but is no longer needed
+    # All frames in 5-color system are equivalent (no lower/upper distinction)
+    return "data"
 
 
 def compute_slice_layout(rows, cols, grid_size):
@@ -450,22 +440,23 @@ def compute_slice_layout(rows, cols, grid_size):
 
 
 class CodecTransmitterDisplay:
-    """Full-screen transmitter that cycles codec grids using 8-color encoding."""
+    """Full-screen transmitter that cycles codec grids using 5-color encoding."""
 
     def __init__(self, tensor, grid_size, fps, start_signal_seconds=1.0):
         self.tensor = tensor
         self.grid_size = grid_size
         self.fps = max(fps, 1e-6)
         self.rows, self.cols = tensor.shape
-        self.codec = codec(self.rows, self.cols, min_val=0, max_val=15)
+        self.codec = codec(self.rows, self.cols, min_val=CODEC_MIN_VAL, max_val=CODEC_MAX_VAL)
         self.encoded_grids = self.codec.encode(tensor)
 
         layout = compute_slice_layout(self.rows, self.cols, self.grid_size)
         (self.rows_per_slice, self.cols_per_slice,
          self.num_row_slices, self.num_col_slices) = layout
+        # 5-color system: no phases, just direct grid display
         self.total_frames = (self.encoded_grids.shape[0] *
                              self.num_row_slices *
-                             self.num_col_slices * 2)
+                             self.num_col_slices)
 
         self.cell_size = 24
         self.border = 40
@@ -487,7 +478,6 @@ class CodecTransmitterDisplay:
         self.current_grid_idx = 0
         self.current_row_slice = 0
         self.current_col_slice = 0
-        self.current_color_frame = 0
         self.flash_counter = 0
         self.last_frame_time = _time.time()
         self.remaining_start_frames = 0
@@ -499,7 +489,7 @@ class CodecTransmitterDisplay:
         self.remaining_start_frames = self.start_signal_frames
         print(f"\n[TX] Starting auto-transmission at {self.fps:.2f} FPS "
               f"({self.total_frames} frames)")
-        print(f"[TX] First data frame will be Grid 1, frame 0 (lower phase with colors 0-7)")
+        print(f"[TX] First data frame will be Grid 1 (5-color system: colors 0-4)")
 
     def update(self):
         if not self.transmitting or self.done:
@@ -513,7 +503,7 @@ class CodecTransmitterDisplay:
                 self.remaining_start_frames -= 1
                 if self.remaining_start_frames == 0:
                     print("[TX] Start signal complete, streaming data...")
-                    print(f"[TX] Starting with Grid 1, frame {self.current_color_frame} ({'lower' if self.current_color_frame == 0 else 'upper'})")
+                    print(f"[TX] Starting with Grid 1")
             return
 
         if now - self.last_frame_time >= self.frame_interval:
@@ -521,23 +511,21 @@ class CodecTransmitterDisplay:
             self._advance()
 
     def _advance(self):
-        self.current_color_frame += 1
-        if self.current_color_frame >= 2:
-            self.current_color_frame = 0
-            self.current_col_slice += 1
+        # 5-color system: no phases, just advance through slices and grids
+        self.current_col_slice += 1
 
-            if self.current_col_slice >= self.num_col_slices:
-                self.current_col_slice = 0
-                self.current_row_slice += 1
+        if self.current_col_slice >= self.num_col_slices:
+            self.current_col_slice = 0
+            self.current_row_slice += 1
 
-                if self.current_row_slice >= self.num_row_slices:
-                    self.current_row_slice = 0
-                    self.current_grid_idx += 1
+            if self.current_row_slice >= self.num_row_slices:
+                self.current_row_slice = 0
+                self.current_grid_idx += 1
 
-                    if self.current_grid_idx >= self.encoded_grids.shape[0]:
-                        self.done = True
-                        print("\n[TX] ✓ All frames transmitted. Showing DONE frame.")
-                        return
+                if self.current_grid_idx >= self.encoded_grids.shape[0]:
+                    self.done = True
+                    print("\n[TX] ✓ All frames transmitted. Showing DONE frame.")
+                    return
 
     def _current_slice_values(self):
         full_grid = self.encoded_grids[self.current_grid_idx]
@@ -572,15 +560,13 @@ class CodecTransmitterDisplay:
                         x2 = (j + 1) * self.cell_size
                         grid[y1:y2, x1:x2] = color
         elif self.remaining_start_frames > 0:
-            grid[:] = COLORS_8[START_SIGNAL_COLOR_INDEX]
+            grid[:] = COLORS_5[START_SIGNAL_COLOR_INDEX]
         elif self.done:
             grid[:] = [0, 255, 0]
         else:
+            # 5-color system: directly map grid values (0-4) to colors
             slice_values = self._current_slice_values()
-            if self.current_color_frame == 0:
-                color_indices = slice_values & 0x07  # Lower 3 bits: values 0-7
-            else:
-                color_indices = (slice_values >> 3) & 0x01  # Bit 3: values 0-1
+            color_indices = slice_values  # Direct mapping, no bit extraction
                 
             # Debug: print unique color indices every few frames (only if verbose)
             if hasattr(self, 'debug_verbose') and self.debug_verbose:
@@ -591,13 +577,12 @@ class CodecTransmitterDisplay:
                     
                 if self._debug_counter % 10 == 0:
                     unique_indices = np.unique(color_indices)
-                    print(f"\n[TX DEBUG] Frame type: {'lower' if self.current_color_frame == 0 else 'upper'}, "
-                          f"unique color indices: {unique_indices}")
+                    print(f"\n[TX DEBUG] Unique color indices (0-4): {unique_indices}")
 
             for i in range(self.grid_size):
                 for j in range(self.grid_size):
                     color_idx = color_indices[i, j]
-                    color = COLORS_8[color_idx]
+                    color = COLORS_5[color_idx]
                     y1 = i * self.cell_size
                     y2 = (i + 1) * self.cell_size
                     x1 = j * self.cell_size
@@ -649,19 +634,19 @@ def create_test_pattern_tensor(rows, cols):
 
 
 def create_color_test_pattern_tensor(rows, cols):
-    """Create a simple test pattern that cycles through all 8 palette colors.
+    """Create a simple test pattern that cycles through all 5 palette colors.
 
-    This creates a tensor that when encoded will produce grids with values 0-7,
-    which map to the 8 colors in COLORS_8 palette in the lower phase.
+    This creates a tensor that when encoded will produce grids with values 0-4,
+    which map to the 5 colors in COLORS_5 palette.
     """
-    # The codec encodes values in range [min_val, max_val] to [0, 15]
-    # We want encoded grid values 0-7 to test all 8 colors
-    # Create a simple repeating pattern of values 0-7
+    # The codec encodes values in range [min_val, max_val] which is [0, 4]
+    # We want encoded grid values 0-4 to test all 5 colors
+    # Create a simple repeating pattern of values 0-4
     tensor = np.zeros((rows, cols), dtype=np.float16)
     for i in range(rows):
         for j in range(cols):
-            # Create a pattern that cycles through 0-7
-            value = (i * cols + j) % 8
+            # Create a pattern that cycles through 0-4
+            value = (i * cols + j) % 5
             tensor[i, j] = value
 
     return tensor
@@ -722,9 +707,9 @@ def load_tensor(args):
     if hasattr(args, 'color_test_pattern') and args.color_test_pattern:
         # Create a simple color test pattern
         tensor = create_color_test_pattern_tensor(args.rows, args.cols)
-        print(f"[TX] Using color test pattern (cycles through colors 0-7)")
+        print(f"[TX] Using color test pattern (cycles through colors 0-4: {', '.join(COLOR_NAMES)})")
         print(f"[TX] First row: {tensor[0, :min(10, args.cols)]}")
-        print(f"[TX] Pattern repeats every 8 cells")
+        print(f"[TX] Pattern repeats every 5 cells")
         return tensor
 
     if args.test_pattern:
@@ -741,26 +726,24 @@ def load_tensor(args):
 
 
 def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force_alternating=False):
+    """
+    Decode captured color frames into grids for 5-color system.
+    No phases - each frame is a direct grid slice with values 0-4.
+    """
     # Validate codec_obj is actually a codec object
     if not hasattr(codec_obj, 'grids_needed'):
         raise TypeError(f"codec_obj must be a codec object, got {type(codec_obj)}: {codec_obj}")
     
     rows_per_slice, cols_per_slice, num_row_slices, num_col_slices = compute_slice_layout(rows, cols, grid_size)
-    expected = codec_obj.grids_needed() * num_row_slices * num_col_slices * 2
+    # 5-color system: no phases, so just 1 frame per slice
+    expected = codec_obj.grids_needed() * num_row_slices * num_col_slices
     if len(color_frames) < expected:
         raise ValueError(f"Need {expected} frames, captured {len(color_frames)}")
 
-    # Classify frames by phase
-    frame_phases = []
-    for frame in color_frames:
-        phase = classify_frame_phase(frame)
-        frame_phases.append(phase)
+    print(f"[RX] Decoding {len(color_frames)} frames into {codec_obj.grids_needed()} grids (5-color system)")
     
-    print(f"[RX] Frame phases: {frame_phases}")
-    
-    # Try to decode assuming frames are in order
+    # Decode frames in order - each frame is one grid slice
     frame_iter = iter(color_frames)
-    frame_idx = 0
     grids = []
     try:
         for grid_idx in range(codec_obj.grids_needed()):
@@ -768,72 +751,19 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force
             for row_idx in range(num_row_slices):
                 col_blocks = []
                 for col_idx in range(num_col_slices):
-                    # Get next two frames - try to get one of each phase
-                    frame1 = next(frame_iter)
-                    phase1 = classify_frame_phase(frame1)
-                    frame2 = next(frame_iter)
-                    phase2 = classify_frame_phase(frame2)
-                    unique1 = np.unique(frame1)
-                    unique2 = np.unique(frame2)
-                    
-                    if force_alternating:
-                        swapped = False
-                        # Lower phase should have a richer palette (0-7). Upper frames are binary.
-                        warning_binary = False
-                        if unique1.size <= 2 and unique2.size > 2:
-                            lower, upper = frame2, frame1
-                            swapped = True
-                        elif unique1.size > 2 and unique2.size <= 2:
-                            lower, upper = frame1, frame2
-                        else:
-                            # Both look multi-valued (likely noise) - default to frame1 lower
-                            lower, upper = frame1, frame2
-                            if unique1.size <= 2 and unique2.size <= 2:
-                                warning_binary = True
-                        if swapped:
-                            print(f"[RX] Grid {grid_idx+1}: Forcing alternating - frame1=upper, frame2=lower (auto swap)")
-                        else:
-                            print(f"[RX] Grid {grid_idx+1}: Forcing alternating - frame1=lower, frame2=upper")
-                        if warning_binary:
-                            print(f"[RX] WARNING: Both frames look binary; assuming frame1 is lower due to start-signal alignment.")
-                    else:
-                        # For robustness, determine phase by looking at value distribution
-                        # Lower phase should have more diverse values (0-7)
-                        # Upper phase should be mostly 0s and 1s
-                        
-                        # Count how many cells are 0 or 1 in each frame
-                        binary_ratio1 = np.sum((frame1 == 0) | (frame1 == 1)) / frame1.size
-                        binary_ratio2 = np.sum((frame2 == 0) | (frame2 == 1)) / frame2.size
-                        
-                        # The frame with higher binary ratio is likely the upper phase
-                        if binary_ratio2 > binary_ratio1:
-                            lower, upper = frame1, frame2
-                            print(f"[RX] Grid {grid_idx+1}: frame1 is lower (binary ratio {binary_ratio1:.2f}), "
-                                  f"frame2 is upper (binary ratio {binary_ratio2:.2f})")
-                        else:
-                            lower, upper = frame2, frame1
-                            print(f"[RX] Grid {grid_idx+1}: frame2 is lower (binary ratio {binary_ratio2:.2f}), "
-                                  f"frame1 is upper (binary ratio {binary_ratio1:.2f})")
-                    
-                    lower_bits = (lower & 0x07).astype(np.uint8)
-                    upper_bit = (upper & 0x01).astype(np.uint8)
-                    slice_values = lower_bits | (upper_bit << 3)
+                    # Get next frame - direct mapping, no phases
+                    frame = next(frame_iter)
+                    slice_values = frame.astype(np.uint8)
                     col_blocks.append(slice_values)
                     
-                    # Debug: show unique values for all grids
-                    lower_unique = np.unique(lower)
-                    upper_unique = np.unique(upper) 
-                    print(f"[RX] Grid {grid_idx+1} decode: lower has {len(lower_unique)} unique values: {lower_unique}, "
-                          f"upper has {len(upper_unique)} unique values: {upper_unique}")
+                    # Debug: show unique values
+                    unique_vals = np.unique(frame)
+                    print(f"[RX] Grid {grid_idx+1}, slice ({row_idx},{col_idx}): "
+                          f"{len(unique_vals)} unique values: {unique_vals}")
                     
                     if grid_idx == 0 and row_idx == 0 and col_idx == 0:  # First slice of first grid
-                        print(f"[RX] Sample decode: lower[0,0]={lower[0,0]} -> {lower_bits[0,0]}, "
-                              f"upper[0,0]={upper[0,0]} -> {upper_bit[0,0]}, "
-                              f"combined={slice_values[0,0]}")
+                        print(f"[RX] Sample values: frame[0,0]={frame[0,0]}, frame[0,1]={frame[0,1]}")
                         
-                    # Warn if phases seem swapped
-                    if len(lower_unique) <= 2 and len(upper_unique) > 2:
-                        print(f"[RX] WARNING: Phases may be swapped! Lower should have 0-7, upper should have 0-1")
                 row_bands.append(np.hstack(col_blocks))
             full_grid = np.vstack(row_bands)
             grids.append(full_grid[:rows, :cols])
@@ -848,16 +778,16 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force
         unique_vals = np.unique(grid)
         print(f"[RX] Grid {i+1} unique values: {unique_vals}, min={grid.min()}, max={grid.max()}")
     
-    # Ensure values are within valid range [0, 15]
-    if stacked_grids.max() > 15:
-        print(f"[RX] WARNING: Grid values exceed 15 (max={stacked_grids.max()}), clamping to valid range")
-        stacked_grids = np.clip(stacked_grids, 0, 15)
+    # Ensure values are within valid range [0, 4]
+    if stacked_grids.max() > CODEC_MAX_VAL:
+        print(f"[RX] WARNING: Grid values exceed {CODEC_MAX_VAL} (max={stacked_grids.max()}), clamping to valid range")
+        stacked_grids = np.clip(stacked_grids, CODEC_MIN_VAL, CODEC_MAX_VAL)
     
     return stacked_grids
 
 
 def generate_expected_color_frames(tensor, codec_obj, grid_size, flip_horizontal=False):
-    """Generate the exact color indices TX should produce for each frame."""
+    """Generate the exact color indices TX should produce for each frame (5-color system)."""
     encoded = codec_obj.encode(tensor)
     rows_per_slice, cols_per_slice, num_row_slices, num_col_slices = compute_slice_layout(
         codec_obj.rows, codec_obj.cols, grid_size)
@@ -873,13 +803,10 @@ def generate_expected_color_frames(tensor, codec_obj, grid_size, flip_horizontal
                 slice_values = np.zeros((rows_per_slice, cols_per_slice), dtype=full_grid.dtype)
                 window = full_grid[start_row:end_row, start_col:end_col]
                 slice_values[:window.shape[0], :window.shape[1]] = window
-                lower = (slice_values & 0x07).astype(np.uint8)
-                upper = ((slice_values >> 3) & 0x01).astype(np.uint8)
+                # 5-color system: direct mapping, no bit extraction
                 if flip_horizontal:
-                    lower = np.fliplr(lower)
-                    upper = np.fliplr(upper)
-                frames.append(lower)
-                frames.append(upper)
+                    slice_values = np.fliplr(slice_values)
+                frames.append(slice_values.astype(np.uint8))
     return frames
 
 
@@ -912,10 +839,12 @@ def run_tx(args):
     cv2.setWindowProperty("Codec TX", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     print("\n" + "=" * 70)
-    print("TX MODE - CODEC VISUAL LINK")
+    print("TX MODE - CODEC VISUAL LINK (5-Color System)")
     print("=" * 70)
+    print(f"Colors: {', '.join(COLOR_NAMES)} (values 0-{CODEC_MAX_VAL})")
     print(f"Tensor: {tensor.shape}, dtype={tensor.dtype}")
     print(f"Visual grid: {args.grid_size}x{args.grid_size}, FPS: {args.fps}")
+    print(f"Codec: {tx.codec.grids_needed()} grids needed for FP16 encoding")
     print(f"Total frames to send: {tx.expected_frames()}")
     if tx.start_signal_frames > 0:
         print(f"Start signal: solid green for {tx.start_signal_frames} frame(s) "
@@ -960,11 +889,12 @@ def run_rx(args):
     if args.debug_color_sampling:
         rx.debug_color_sampling = True
         print("[RX] Color sampling debug enabled")
-    codec_obj = codec(args.rows, args.cols, min_val=0, max_val=15)
+    codec_obj = codec(args.rows, args.cols, min_val=CODEC_MIN_VAL, max_val=CODEC_MAX_VAL)
     if not hasattr(codec_obj, 'grids_needed'):
         raise TypeError(f"Failed to create codec object: got {type(codec_obj)}")
     layout = compute_slice_layout(args.rows, args.cols, args.grid_size)
-    total_frames_needed = codec_obj.grids_needed() * layout[2] * layout[3] * 2
+    # 5-color system: no phases, so just 1 frame per slice
+    total_frames_needed = codec_obj.grids_needed() * layout[2] * layout[3]
 
     captured_frames = []
     capture_active = False
@@ -977,7 +907,6 @@ def run_rx(args):
     capture_tolerance = max(0.0, min(1.0, args.capture_tolerance))
     capture_stability = max(1, args.capture_stability)
     capture_timeout = max(0.0, args.capture_timeout)
-    expected_phase = "lower"
     last_capture_time = 0  # Track when we last captured a frame
     min_capture_interval = args.capture_interval  # Minimum seconds between captures
     waiting_for_start_signal = False
@@ -1010,10 +939,11 @@ def run_rx(args):
                 reference_tensor, codec_obj, args.grid_size, flip_horizontal=args.flip_horizontal)
 
     print("\n" + "=" * 70)
-    print("RX MODE - CODEC VISUAL LINK")
+    print("RX MODE - CODEC VISUAL LINK (5-Color System)")
     print("=" * 70)
+    print(f"Colors: {', '.join(COLOR_NAMES)} (values 0-{CODEC_MAX_VAL})")
     print(f"Expecting {total_frames_needed} frames "
-          f"({codec_obj.grids_needed()} grids × {layout[2]} row slices × {layout[3]} col slices × 2 color frames)")
+          f"({codec_obj.grids_needed()} grids × {layout[2]} row slices × {layout[3]} col slices)")
     print("Controls:")
     print("  c   - Calibrate (lock onto TX grid)")
     print("  p   - Start capture (after calibration)")
@@ -1100,7 +1030,6 @@ def run_rx(args):
                     if is_start_signal(pattern):
                         continue
                     waiting_for_first_data_frame = False
-                    expected_phase = "lower"
                     print("\n[RX] Start signal complete - capturing data frames.")
                 if len(captured_frames) == 0:
                     if is_calibration_pattern(pattern):
@@ -1121,8 +1050,6 @@ def run_rx(args):
                 # For debugging, let's capture all frames with any significant change
                 if args.debug_capture_all:
                     min_changed = max(1, int(total_cells * 0.01))  # Only 1% change needed
-                elif phase == "upper":
-                    min_changed = max(1, int(total_cells * 0.05))  # Only 5% change needed for upper frames
                 
                 if diff_last < min_changed:
                     continue
@@ -1130,11 +1057,11 @@ def run_rx(args):
                 now = time.time()
 
                 # We detected significant change, so this is likely a new frame
-                # Only print debug for phase changes or unusual patterns when requested
+                # Only print debug for unusual patterns when requested
                 if args.debug_capture_all:
                     unique_vals = np.unique(pattern)
-                    if phase == "upper" or len(unique_vals) > 4 or frame_count % 30 == 0:
-                        print(f"\n[RX DEBUG] Phase: {phase}, unique values: {unique_vals}, "
+                    if len(unique_vals) > 3 or frame_count % 30 == 0:
+                        print(f"\n[RX DEBUG] Frame type: {phase}, unique values: {unique_vals}, "
                               f"max={pattern.max()}, diff={diff_last}/{total_cells}")
 
                 if phase_seen_time is None:
@@ -1203,14 +1130,14 @@ def run_rx(args):
                                 # Find which grids might be problematic
                                 for i, grid in enumerate(grids):
                                     unique_vals = np.unique(grid)
-                                    expected = set(range(16))
+                                    expected = set(range(CODEC_MAX_VAL + 1))  # 0-4 for 5-color system
                                     missing = expected - set(unique_vals)
                                     if missing:
                                         print(f"[RX] Grid {i+1} is missing values: {sorted(missing)}")
                                         if 0 in missing:
-                                            print("[RX] Tip: Missing value 0 (black) - try increasing border with '+' key")
-                                        if 7 in missing:
-                                            print("[RX] Tip: Missing value 7 (white) - might be clipping, try decreasing border with '-' key")
+                                            print(f"[RX] Tip: Missing value 0 ({COLOR_NAMES[0]}) - try increasing border with '+' key")
+                                        if CODEC_MAX_VAL in missing:
+                                            print(f"[RX] Tip: Missing value {CODEC_MAX_VAL} ({COLOR_NAMES[CODEC_MAX_VAL]}) - might be clipping, try decreasing border with '-' key")
                             else:
                                 print("[RX] ✓ Decode complete!")
                             
@@ -1264,7 +1191,6 @@ def run_rx(args):
                             print(f"[RX] ✗ Decode failed: {err}")
                         capture_active = False
                         phase_seen_time = None
-                        expected_phase = "lower"
                         waiting_for_start_signal = False
                         waiting_for_first_data_frame = False
                         start_signal_detected = False
@@ -1277,7 +1203,6 @@ def run_rx(args):
                 pending_phase = None
                 pending_consistency = 0
                 phase_seen_time = None
-                expected_phase = "lower"
                 waiting_for_start_signal = False
                 waiting_for_first_data_frame = False
                 start_signal_detected = False
@@ -1319,7 +1244,6 @@ def run_rx(args):
                 pending_consistency = 0
                 pending_phase = None
                 phase_seen_time = None
-                expected_phase = "lower"
                 last_capture_time = 0  # Reset capture timing
                 waiting_for_start_signal = False
                 waiting_for_first_data_frame = False
@@ -1343,7 +1267,6 @@ def run_rx(args):
                 pending_consistency = 0
                 pending_phase = None
                 phase_seen_time = None
-                expected_phase = "lower"
                 last_capture_time = 0  # Reset capture timing
                 waiting_for_start_signal = not args.skip_start_signal
                 waiting_for_first_data_frame = False
@@ -1361,7 +1284,6 @@ def run_rx(args):
             pending_consistency = 0
             pending_phase = None
             phase_seen_time = None
-            expected_phase = "lower"
             last_capture_time = 0  # Reset capture timing
             capture_active = False
             waiting_for_start_signal = False
@@ -1422,7 +1344,7 @@ def build_arg_parser():
     parser.add_argument('--tensor', type=str, help='Path to .npy tensor for TX mode')
     parser.add_argument('--seed', type=int, default=42, help='Seed for random tensor (TX)')
     parser.add_argument('--test-pattern', action='store_true', help='Use test pattern tensor instead of random (TX)')
-    parser.add_argument('--color-test-pattern', action='store_true', help='Use simple color test pattern (cycles 0-7) for TX mode')
+    parser.add_argument('--color-test-pattern', action='store_true', help='Use simple color test pattern (cycles 0-4) for TX mode')
     parser.add_argument('--camera-index', type=int, default=0, help='Camera index for RX mode')
     parser.add_argument('--brightness-adjust', type=int, default=0,
                         help='Brightness adjustment for color sampling, -100 to +100 (RX mode)')
