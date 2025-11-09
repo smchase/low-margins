@@ -528,7 +528,8 @@ class Camera:
     def _render_color_calibration_pattern(
             self, color_idx: int) -> NDArray[np.uint8]:
         """Renders a full grid with all cells showing the same color."""
-        img = np.ones((self.display_height, self.display_width, 3), dtype=np.uint8) * 255
+        # Use BLACK background so white color is visible
+        img = np.zeros((self.display_height, self.display_width, 3), dtype=np.uint8)
 
         x_start, y_start, cell_size, data_width, data_height = self._compute_data_layout()
         x_start_int = int(round(x_start))
