@@ -34,7 +34,7 @@ class Node:
         self.learning_rate = learning_rate
         self.device = device
         
-        self.model = MLP().to(device)
+        self.model = MLP().bfloat16().to(device)
         
         if root:
             self.state = RootState.INIT
@@ -117,7 +117,10 @@ class Node:
             self.optimizer.zero_grad()
             for param, grad in zip(self.model.parameters(), averaged_grads):
                 if grad is not None:
-                    param.grad = grad.clone()
+                    # Cast fp32 gradients to bfloat16 to match parameter dtype
+                    param.grad = grad.bfloat16()
+            
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             
             self.optimizer.step()
             
@@ -141,9 +144,10 @@ class Node:
         
         with torch.no_grad():
             for inputs, labels in test_loader:
-                inputs = inputs.to(self.device)
+                inputs = inputs.to(self.device).bfloat16()
                 labels = labels.to(self.device)
                 outputs = self.model(inputs)
+                outputs = outputs.float()
                 
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)

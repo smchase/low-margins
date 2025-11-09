@@ -30,17 +30,18 @@ class Worker:
             self.data_iter = iter(self.data)
             inputs, labels = next(self.data_iter)
         
-        inputs = inputs.to(self.device)
+        inputs = inputs.to(self.device).bfloat16()
         labels = labels.to(self.device)
         
         self.model.zero_grad()
         
         outputs = self.model(inputs)
+        outputs = outputs.float()
         loss = self.criterion(outputs, labels)
         
         loss.backward()
         
-        gradients = [param.grad.clone() if param.grad is not None else None 
+        gradients = [param.grad.float().clone() if param.grad is not None else None 
                      for param in self.model.parameters()]
         
         return gradients, loss.item()
