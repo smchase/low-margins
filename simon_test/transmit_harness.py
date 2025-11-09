@@ -59,6 +59,8 @@ if __name__ == "__main__":
             print(f"[ODD {current_second}] Transmitted test case {current_test_idx}")
             current_test_idx += 1
             last_second = current_second
+        
+        cv2.waitKey(30)
     
     if current_test_idx >= len(test_cases):
         print(f"\n✓ All {len(test_cases)} test cases transmitted!")
