@@ -5,7 +5,7 @@ Workflow:
 1. Both computers: Complete calibration (T to transmit, R to receive)
 2. Sender: Press S for send mode
    - Shows GREEN start signal for 5 seconds
-   - Sends encoded grids at 4fps (one pass only)
+   - Sends encoded grids at 2fps (one pass only)
    - Shows GREEN end signal when done
    - Press S again to restart transmission
 3. Receiver: Press R for receive mode, then SPACE to start
@@ -20,8 +20,8 @@ Workflow:
    - Press 0 for auto exposure
 
 Note: Both TX and RX use the same hardcoded tensor (seed=42) for verification.
-Grid size: 32x32 pixels
-At 4fps, fast shutter speed may be needed to avoid motion blur
+Grid size: 64x32 pixels (2:1 aspect ratio)
+At 2fps, slower shutter speed can be used for better exposure
 """
 import numpy as np
 import cv2
@@ -75,9 +75,9 @@ def test_send_receive():
         if not cam.test_mode:
             ret, webcam_frame = cam.cap.read()
             if not ret:
-                webcam_frame = np.zeros((cam.display_size, cam.display_size, 3), dtype=np.uint8)
+                webcam_frame = np.zeros((cam.display_height, cam.display_width, 3), dtype=np.uint8)
         else:
-            webcam_frame = np.zeros((cam.display_size, cam.display_size, 3), dtype=np.uint8)
+            webcam_frame = np.zeros((cam.display_height, cam.display_width, 3), dtype=np.uint8)
 
         display = cam._render_window(webcam_frame)
         cv2.imshow('Camera Data Link', display)
@@ -107,15 +107,15 @@ def test_send_receive():
 
 def send_mode(cam: Camera, grids: np.ndarray):
     """
-    Sender: Display frames at 4fps.
+    Sender: Display frames at 2fps.
     Sequence: green start signal (5s) -> grid[0] -> grid[1] -> ... -> grid[D-1] -> green end signal (hold)
     Press S to restart transmission.
     """
     print("\n=== SEND MODE ===")
-    print(f"Sending {grids.shape[0]} grids at 4fps (0.25s per frame)")
+    print(f"Sending {grids.shape[0]} grids at 2fps (0.5s per frame)")
     print("Press S to start/restart transmission, Q to quit")
 
-    frame_interval = 0.25  # 4fps = 0.25 seconds per frame
+    frame_interval = 0.5  # 2fps = 0.5 seconds per frame
 
     # State: idle, start_signal, transmitting, end_signal
     state = "idle"
@@ -187,7 +187,8 @@ def send_mode(cam: Camera, grids: np.ndarray):
 def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
     """
     Receiver: Continuously capture frames and detect changes.
-    Wait for green start signal to end, then collect grids.
+    Captures grids immediately when significant change is detected (>300 cells).
+    Uses debouncing (3 frames min) to avoid capturing the same grid multiple times.
     """
     print("\n=== RECEIVE MODE ===")
     print(f"Expecting {c.grids_needed()} grids")
@@ -216,9 +217,7 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
 
     collected_grids = []
     prev_frame_data = None
-    frames_stable = 0
-    STABILITY_THRESHOLD = 3  # Need 3 stable frames before capturing
-    CHANGE_THRESHOLD = 50  # Number of cells that must differ to detect change
+    CHANGE_THRESHOLD = 200  # Number of cells that must differ to detect a new grid
 
     # State machine: idle -> waiting_for_start -> collecting -> done
     state = "idle"
@@ -250,7 +249,6 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                 print("✓ Start signal ended, beginning collection!")
                 state = "collecting"
                 collected_grids = []
-                frames_stable = 0
                 prev_frame_data = current_data.copy()
 
         elif state == "collecting":
@@ -262,7 +260,7 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                 diff_count = np.sum(current_data != prev_frame_data)
 
                 if diff_count > CHANGE_THRESHOLD:
-                    # Major change detected
+                    # Major change detected - this is likely a new grid
                     if is_end_signal:
                         # Green end signal detected!
                         print(f"[END SIGNAL DETECTED] Stopping collection")
@@ -277,17 +275,12 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                             collected_grids = []
                             continue
                     else:
-                        # Regular frame change
-                        frames_stable = 0
+                        # New grid detected - capture immediately
                         unique, counts = np.unique(current_data, return_counts=True)
                         color_dist = dict(zip(unique, counts))
-                        print(f"[CHANGE DETECTED] {diff_count} cells changed, colors: {color_dist}")
-                else:
-                    # Frame is stable
-                    frames_stable += 1
+                        print(f"[NEW GRID DETECTED] {diff_count} cells changed, colors: {color_dist}")
 
-                    # If stable enough and not end signal, capture it
-                    if frames_stable == STABILITY_THRESHOLD and not is_end_signal:
+                        # Capture this grid
                         collected_grids.append(current_data.copy())
                         print(f"✓ Captured grid {len(collected_grids)}/{c.grids_needed()}")
                         print(f"  Stats: min={current_data.min()}, max={current_data.max()}, unique={len(np.unique(current_data))}")
@@ -343,8 +336,6 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                                 traceback.print_exc()
                                 state = "idle"
                                 collected_grids = []
-                        # Reset stable counter after successful capture
-                        frames_stable = 0
 
             prev_frame_data = current_data.copy()
 
@@ -359,9 +350,9 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
         if not cam.test_mode:
             ret, webcam_frame = cam.cap.read()
             if not ret:
-                webcam_frame = np.zeros((cam.display_size, cam.display_size, 3), dtype=np.uint8)
+                webcam_frame = np.zeros((cam.display_height, cam.display_width, 3), dtype=np.uint8)
         else:
-            webcam_frame = np.zeros((cam.display_size, cam.display_size, 3), dtype=np.uint8)
+            webcam_frame = np.zeros((cam.display_height, cam.display_width, 3), dtype=np.uint8)
 
         display = cam._render_window(webcam_frame)
         cv2.imshow('Camera Data Link', display)
@@ -376,7 +367,7 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                 # Start waiting for green start signal
                 state = "waiting_for_start"
                 collected_grids = []
-                frames_stable = 0
+                frames_since_last_capture = 0
                 prev_frame_data = None
                 print("\n[WAITING] Looking for GREEN start signal...")
         elif key == ord('+') or key == ord('='):
