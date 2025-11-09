@@ -227,8 +227,20 @@ class Camera:
                     rx_frames_stable = 0
             elif rx_state == "locked":
                 # Wait for markers to disappear (transition to colors)
-                rx_state = "receiving_colors"
-                print("Waiting for color patterns...")
+                # Capture current samples and wait for a significant change
+                curr_samples = self._capture_color_samples()
+
+                if rx_prev_samples is None:
+                    rx_prev_samples = curr_samples.copy()
+                elif self._detect_color_change(rx_prev_samples, curr_samples):
+                    # Markers have disappeared! Transition to receiving colors
+                    rx_state = "receiving_colors"
+                    rx_prev_samples = curr_samples.copy()
+                    rx_frames_stable = 0
+                    print("✓ Markers disappeared, capturing color patterns...")
+                else:
+                    rx_prev_samples = curr_samples.copy()
+
             elif rx_state == "receiving_colors":
                 curr_samples = self._capture_color_samples()
 
