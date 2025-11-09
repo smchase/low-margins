@@ -221,22 +221,78 @@ def worker_process(worker_id, is_root, data_indices, grad_queue, param_queue, re
         print(f"Root: Training complete!")
         node.save_model('model_weights.pth')
         print(f"Root: Model saved to model_weights.pth")
-        
-        print(f"Root: Running evaluation...")
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-        ])
-        
-        test_dataset = datasets.MNIST(
-            root='./data',
-            train=False,
-            download=True,
-            transform=transform
+
+        print("Root: Exporting model to onnx...")
+        model = MLP(num_classes=10)
+        model.load_state_dict(torch.load("model_weights.pth", map_location="cpu"))
+        model.eval()
+
+        dummy = torch.randn(1, 1, 28, 28)  # (N,C,H,W)
+
+        torch.onnx.export(
+            model,
+            dummy,
+            f"mlp_{max_steps}_part.onnx",
+            input_names=["input"],
+            output_names=["logits"],
+            opset_version=18,
         )
-        
-        test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
-        accuracy = node.evaluate(test_loader)
-        print(f"Root: Test Accuracy: {accuracy:.2f}%")
+        print("✅ Exported to mlp.onnx")
+
+        import onnx
+
+        imported_model = onnx.load(
+            f"mlp_{max_steps}_part.onnx", load_external_data=True
+        )
+        onnx.save(imported_model, f"mlp_{max_steps}.onnx")
+
+        import os
+
+        try:
+            import firebase_admin
+            from firebase_admin import credentials, storage as firebase_storage
+
+            # Initialize Firebase Admin SDK if not already initialized
+            if not firebase_admin._apps:
+                # Try to use service account key file if available
+                service_account_path = os.getenv(
+                    "FIREBASE_SERVICE_ACCOUNT_KEY", "firebase-service-account.json"
+                )
+                if os.path.exists(service_account_path):
+                    cred = credentials.Certificate(service_account_path)
+                    firebase_admin.initialize_app(
+                        cred, {"storageBucket": "low-margins.firebasestorage.app"}
+                    )
+                else:
+                    # Use Application Default Credentials (for GCP environments)
+                    firebase_admin.initialize_app(
+                        options={"storageBucket": "low-margins.firebasestorage.app"}
+                    )
+
+            # Upload the ONNX file
+            bucket = firebase_storage.bucket()
+            onnx_filename = f"mlp_{max_steps}.onnx"
+            blob = bucket.blob(f"models/{onnx_filename}")
+
+            print(f"Uploading {onnx_filename} to Firebase Storage...")
+            blob.upload_from_filename(onnx_filename)
+
+            # Make the file publicly accessible (optional - remove if you want private files)
+            blob.make_public()
+
+            print(f"✅ Successfully uploaded {onnx_filename} to Firebase Storage")
+            print(f"   Public URL: {blob.public_url}")
+        except ImportError:
+            print(
+                "⚠️  firebase-admin not installed. Install it with: pip install firebase-admin"
+            )
+        except Exception as e:
+            print(f"⚠️  Failed to upload to Firebase: {e}")
+
+        # delete the original onnx file
+        os.remove(f"mlp_{max_steps}_part.onnx")
+        os.remove(f"mlp_{max_steps}_part.onnx.data")
+        os.remove(f"mlp_{max_steps}.onnx")
     
     else:
         num_steps = len(node.worker.data)
