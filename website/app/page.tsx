@@ -183,14 +183,14 @@ export default function MnistPage() {
       </div>
 
       {/* grid of images */}
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))]">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))] gap-1">
         {items.map((item, idx) => {
           const hasPrediction = item.pred !== -1;
           const correct = hasPrediction && item.label === item.pred;
           return (
             <div
               key={item.id + "-" + idx}
-              className={`m-px aspect-square w-20 h-20 border-8 ${!hasPrediction
+              className={`aspect-square w-20 h-20 border-8 ${!hasPrediction
                 ? "border-slate-300"
                 : correct
                   ? "border-green-500"
