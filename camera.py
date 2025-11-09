@@ -6,9 +6,9 @@ from numpy.typing import NDArray
 import cv2
 from typing import Optional
 
-ROWS = 30
-COLS = 50
-SQUARE_SIZE = 20
+ROWS = 15
+COLS = 30
+SQUARE_SIZE = 40
 PADDING = 25
 
 DATA_WIDTH = COLS * SQUARE_SIZE
