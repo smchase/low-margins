@@ -78,6 +78,7 @@ def test_send_receive():
 
         display = cam._render_window(webcam_frame)
         cv2.imshow('Camera Data Link', display)
+        cam.update_debug_window(webcam_frame)
 
         key = cv2.waitKey(30) & 0xFF
         if key == ord('s') or key == ord('S'):
@@ -112,7 +113,7 @@ def send_mode(cam: Camera, grids: np.ndarray):
     print(f"Sending {grids.shape[0]} grids at 2fps (0.5s per frame)")
     print("Press S to start/restart transmission, Q to quit")
 
-    frame_interval = 0.5  # 2fps = 0.5 seconds per frame
+    frame_interval = 2.0  # 2fps = 2.0 seconds per frame
 
     # State: idle, start_signal, transmitting, end_signal
     state = "idle"
@@ -362,6 +363,7 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
 
         display = cam._render_window(webcam_frame)
         cv2.imshow('Camera Data Link', display)
+        cam.update_debug_window(webcam_frame)
 
         # Handle keyboard
         key = cv2.waitKey(30) & 0xFF

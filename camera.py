@@ -36,6 +36,7 @@ class Camera:
         self.capture_width = self.display_width
         self.locked_corners: Optional[NDArray[np.float32]] = None
         self.warp_matrix: Optional[NDArray[np.float32]] = None
+        self.warp_matrix_inv: Optional[NDArray[np.float32]] = None
         self.test_camera_input: Optional[NDArray[np.uint8]] = None
         self.calibrated_colors: Optional[NDArray[np.float32]] = None
 
@@ -47,6 +48,8 @@ class Camera:
         self.display_mode = "idle"  # idle, transmit_markers, transmit_colors, send_data
         self.display_data: Optional[Frame] = None
         self.debug_grid_overlay = False
+        self.debug_window_name = 'Sampling Debug'
+        self._debug_window_open = False
 
         if not test_mode:
             self.cap = cv2.VideoCapture(0)
@@ -227,8 +230,9 @@ class Camera:
                         [self.warp_width - 1, self.warp_height - 1],
                         [0, self.warp_height - 1]
                     ], dtype=np.float32)
-                    self.warp_matrix = cv2.getPerspectiveTransform(
+                    matrix = cv2.getPerspectiveTransform(
                         self.locked_corners, dst)
+                    self._set_warp_matrix(matrix)
                     print("✓ Markers detected and locked!")
                     rx_state = "locked"
                     self.calibrated_colors = np.zeros(
@@ -286,6 +290,7 @@ class Camera:
             # Render and display
             display = self._render_window(webcam_frame)
             cv2.imshow('Camera Data Link', display)
+            self._show_sampling_debug(webcam_frame)
 
             # Handle keyboard input
             key = cv2.waitKey(30) & 0xFF
@@ -367,8 +372,9 @@ class Camera:
                 [self.warp_width - 1, self.warp_height - 1],
                 [0, self.warp_height - 1]
             ], dtype=np.float32)
-            self.warp_matrix = cv2.getPerspectiveTransform(
+            matrix = cv2.getPerspectiveTransform(
                 self.locked_corners, dst)
+            self._set_warp_matrix(matrix)
             return True
         return False
 
@@ -430,6 +436,18 @@ class Camera:
             self.capture_height = height
             self.capture_width = width
 
+    def _set_warp_matrix(self, matrix: Optional[NDArray[np.float32]]) -> None:
+        if matrix is None:
+            self.warp_matrix = None
+            self.warp_matrix_inv = None
+            return
+        self.warp_matrix = matrix.astype(np.float32, copy=False)
+        try:
+            inv = np.linalg.inv(self.warp_matrix)
+            self.warp_matrix_inv = inv.astype(np.float32, copy=False)
+        except np.linalg.LinAlgError:
+            self.warp_matrix_inv = None
+
     def _draw_sampling_overlay(self, img: NDArray[np.uint8]) -> None:
         """Draws grid lines showing sampling positions."""
         x_start, y_start, cell_size, data_width, data_height = self._compute_data_layout()
@@ -446,6 +464,52 @@ class Camera:
             x = int(round(x_start + col * cell_size))
             if 0 <= x < self.display_width:
                 cv2.line(img, (x, int(y_start)), (x, y_end), color, 1)
+
+    def _render_sampling_debug_frame(
+            self, frame: NDArray[np.uint8]) -> NDArray[np.uint8]:
+        overlay = frame.copy()
+        if not self._is_calibrated() or self.warp_matrix_inv is None:
+            return overlay
+
+        cell_width = self.warp_width / WIDTH
+        cell_height = self.warp_height / HEIGHT
+        points = []
+        for row in range(HEIGHT):
+            y = (row + 0.5) * cell_height
+            for col in range(WIDTH):
+                x = (col + 0.5) * cell_width
+                points.append([x, y])
+
+        pts = np.array(points, dtype=np.float32).reshape(-1, 1, 2)
+        warp_to_cam = self.warp_matrix_inv.astype(np.float32, copy=False)
+        cam_pts = cv2.perspectiveTransform(pts, warp_to_cam)
+
+        for pt in cam_pts:
+            x = int(round(pt[0][0]))
+            y = int(round(pt[0][1]))
+            if 0 <= x < overlay.shape[1] and 0 <= y < overlay.shape[0]:
+                cv2.circle(overlay, (x, y), 3, (0, 0, 255), -1, lineType=cv2.LINE_AA)
+
+        return overlay
+
+    def _show_sampling_debug(self, frame: Optional[NDArray[np.uint8]]) -> None:
+        if not self.debug_grid_overlay:
+            if self._debug_window_open:
+                cv2.destroyWindow(self.debug_window_name)
+                self._debug_window_open = False
+            return
+
+        if frame is None:
+            overlay = self._blank_capture_frame()
+        else:
+            overlay = self._render_sampling_debug_frame(frame)
+
+        cv2.imshow(self.debug_window_name, overlay)
+        self._debug_window_open = True
+
+    def update_debug_window(self, frame: Optional[NDArray[np.uint8]]) -> None:
+        """Public helper to sync the sampling debug overlay."""
+        self._show_sampling_debug(frame)
 
     def _render_color_calibration_pattern(
             self, color_idx: int) -> NDArray[np.uint8]:
@@ -587,8 +651,9 @@ class Camera:
 
         if self.test_mode:
             frame = self.test_camera_input
-            if frame is not None:
-                self._update_capture_dimensions(frame)
+            if frame is None:
+                return Frame(data=np.zeros((HEIGHT, WIDTH), dtype=np.int64))
+            self._update_capture_dimensions(frame)
         else:
             ret, frame = self.cap.read()
             if not ret:
@@ -663,6 +728,7 @@ if __name__ == "__main__":
         # Render and display
         display = cam._render_window(webcam_frame)
         cv2.imshow('Camera Data Link', display)
+        cam._show_sampling_debug(webcam_frame)
 
         # Handle keyboard input
         key = cv2.waitKey(30) & 0xFF
