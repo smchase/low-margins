@@ -663,9 +663,14 @@ def verify_color_test_pattern(decoded_tensor, rows, cols):
     """Verify that the decoded tensor matches the color test pattern via bit-exact comparison."""
     expected = create_color_test_pattern_tensor(rows, cols)
 
-    print("\n[RX] Verifying color test pattern (bit-exact comparison)...")
-    print(f"[RX] Expected first row: {expected[0, :min(10, cols)]}")
-    print(f"[RX] Decoded first row:  {decoded_tensor[0, :min(10, cols)]}")
+    print("\n[RX VERIFY] Verifying color test pattern (bit-exact comparison)...")
+    print(f"[RX VERIFY] Expected shape: {expected.shape}, Decoded shape: {decoded_tensor.shape}")
+    print(f"[RX VERIFY] Expected range: [{expected.min():.3f}, {expected.max():.3f}]")
+    print(f"[RX VERIFY] Decoded range:  [{decoded_tensor.min():.3f}, {decoded_tensor.max():.3f}]")
+    print(f"[RX VERIFY] Expected first row: {expected[0, :min(10, cols)]}")
+    print(f"[RX VERIFY] Decoded first row:  {decoded_tensor[0, :min(10, cols)]}")
+    print(f"[RX VERIFY] Expected last row:  {expected[-1, :min(10, cols)]}")
+    print(f"[RX VERIFY] Decoded last row:   {decoded_tensor[-1, :min(10, cols)]}")
 
     # Do bit-exact comparison by viewing as uint16
     expected_u16 = expected.view(np.uint16)
@@ -737,9 +742,21 @@ def load_tensor(args):
         from codec import codec
         test_codec = codec(args.rows, args.cols, CODEC_MIN_VAL, CODEC_MAX_VAL)
         test_grids = test_codec.encode(tensor)
+        
+        print(f"[TX ENCODE] Encoded into {test_grids.shape[0]} grids")
+        for i in range(min(3, test_grids.shape[0])):
+            print(f"  Grid {i+1}: unique values = {np.unique(test_grids[i])}, first row = {test_grids[i][0,:5]}")
+        
         test_decoded = test_codec.decode(test_grids)
         matches = np.sum(tensor.view(np.uint16) == test_decoded.view(np.uint16))
         print(f"[TX] Local codec test: {matches}/{tensor.size} cells roundtrip correctly ({matches/tensor.size*100:.1f}%)")
+        
+        if matches == tensor.size:
+            print(f"[TX] ✅ Perfect local roundtrip!")
+        else:
+            print(f"[TX] ⚠️  {tensor.size - matches} cells differ after local roundtrip")
+            print(f"[TX] Original first row: {tensor[0,:10]}")
+            print(f"[TX] Decoded first row:  {test_decoded[0,:10]}")
         
         return tensor
 
@@ -776,6 +793,7 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force
     # Decode frames in order - each frame is one grid slice
     frame_iter = iter(color_frames)
     grids = []
+    frame_counter = 0
     try:
         for grid_idx in range(codec_obj.grids_needed()):
             row_bands = []
@@ -784,30 +802,39 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force
                 for col_idx in range(num_col_slices):
                     # Get next frame - direct mapping, no phases
                     frame = next(frame_iter)
+                    frame_counter += 1
                     slice_values = frame.astype(np.uint8)
                     col_blocks.append(slice_values)
                     
-                    # Debug: show unique values
+                    # Debug: show unique values and corner samples
                     unique_vals = np.unique(frame)
-                    print(f"[RX] Grid {grid_idx+1}, slice ({row_idx},{col_idx}): "
-                          f"{len(unique_vals)} unique values: {unique_vals}")
-                    
-                    if grid_idx == 0 and row_idx == 0 and col_idx == 0:  # First slice of first grid
-                        print(f"[RX] Sample values: frame[0,0]={frame[0,0]}, frame[0,1]={frame[0,1]}")
+                    print(f"[RX DECODE] Frame {frame_counter}: Grid {grid_idx+1}, slice ({row_idx},{col_idx})")
+                    print(f"  Unique values ({len(unique_vals)}): {unique_vals}")
+                    print(f"  Corners: TL={frame[0,0]}, TR={frame[0,-1]}, BL={frame[-1,0]}, BR={frame[-1,-1]}")
+                    print(f"  First row (5 vals): {frame[0,:5]}")
                         
                 row_bands.append(np.hstack(col_blocks))
             full_grid = np.vstack(row_bands)
-            grids.append(full_grid[:rows, :cols])
+            final_grid = full_grid[:rows, :cols]
+            
+            # Debug: show assembled grid info
+            print(f"[RX DECODE] Grid {grid_idx+1} assembled: shape={final_grid.shape}")
+            print(f"  Final grid (after crop): shape={final_grid.shape}")
+            print(f"  First row (5 vals): {final_grid[0,:5]}")
+            print(f"  Unique values in final: {np.unique(final_grid)}")
+            
+            grids.append(final_grid)
     except StopIteration as exc:
         raise ValueError("Incomplete frame sequence for decoding") from exc
 
     stacked_grids = np.stack(grids, axis=0)
     
     # Debug: show the range of values in the decoded grids
-    print(f"[RX] Decoded grids shape: {stacked_grids.shape}")
+    print(f"\n[RX DECODE] Final stacked grids shape: {stacked_grids.shape}")
     for i, grid in enumerate(stacked_grids):
         unique_vals = np.unique(grid)
-        print(f"[RX] Grid {i+1} unique values: {unique_vals}, min={grid.min()}, max={grid.max()}")
+        print(f"[RX DECODE] Grid {i+1} final: unique={unique_vals}, min={grid.min()}, max={grid.max()}")
+        print(f"  First row (5 vals): {grid[0,:5]}")
     
     # Ensure values are within valid range [0, 4]
     if stacked_grids.max() > CODEC_MAX_VAL:
