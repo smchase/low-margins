@@ -5,7 +5,7 @@ Workflow:
 1. Both computers: Complete calibration (T to transmit, R to receive)
 2. Sender: Press S for send mode
    - Shows GREEN start signal for 5 seconds
-   - Then cycles through encoded grids at 10fps
+   - Then cycles through encoded grids at 2fps
 3. Receiver: Press R for receive mode, then SPACE to start
    - Waits for GREEN start signal
    - Detects when start signal changes
@@ -14,6 +14,7 @@ Workflow:
    - Shows diff report (perfect match or error details)
 
 Note: Both TX and RX use the same hardcoded tensor (seed=42) for verification.
+Grid size: 64x64 pixels
 """
 import numpy as np
 import cv2
@@ -99,16 +100,16 @@ def test_send_receive():
 
 def send_mode(cam: Camera, grids: np.ndarray):
     """
-    Sender: Display frames at 10fps.
+    Sender: Display frames at 2fps.
     Sequence: green start signal (5s) -> grid[0] -> grid[1] -> ... -> grid[D-1] -> repeat
     """
     print("\n=== SEND MODE ===")
-    print(f"Sending {grids.shape[0]} grids at 10fps (0.1s per frame)")
+    print(f"Sending {grids.shape[0]} grids at 2fps (0.5s per frame)")
     print("Starting with 5-second GREEN start signal...")
     print("Press Q to quit")
 
     start_time = time.time()
-    frame_interval = 0.1  # 10fps = 0.1 seconds per frame
+    frame_interval = 0.5  # 2fps = 0.5 seconds per frame
     frame_idx = -1  # Will be set after start signal
     last_frame_time = None
     in_start_signal = True
