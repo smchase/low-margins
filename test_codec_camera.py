@@ -16,12 +16,9 @@ Workflow:
    - Decodes and compares with expected tensor
    - Shows diff report (perfect match or error details)
    - Press SPACE again to restart collection
-   - Use +/- to adjust camera shutter speed (exposure)
-   - Press 0 for auto exposure
 
 Note: Both TX and RX use the same hardcoded tensor (seed=42) for verification.
-Grid size: 64x32 pixels (2:1 aspect ratio)
-At 2fps, slower shutter speed can be used for better exposure
+Grid size: 64x32 pixels
 """
 import numpy as np
 import cv2
@@ -32,7 +29,7 @@ from codec import codec
 
 def test_send_receive():
     """
-    Test sending a 16x16 FP16 tensor through the camera using codec.
+    Test sending a 32x64 FP16 tensor through the camera using codec.
     One side sends, other side continuously receives and detects frame changes.
     """
     # Initialize camera
@@ -47,11 +44,11 @@ def test_send_receive():
         return
 
     print("\n=== CODEC SETUP ===")
-    # Create codec for 16x16 tensor with range 0-7 (matching camera's 8 colors)
+    # Create codec for HEIGHT x WIDTH tensor with range 0-7 (matching camera's 8 colors)
     c = codec(rows=HEIGHT, cols=WIDTH, min_val=0, max_val=7)
     print(f"Codec: {HEIGHT}x{WIDTH} grid, range [0,7], {c.grids_needed()} grids needed")
 
-    # Create a HARDCODED test 16x16 FP16 tensor (same on both TX and RX)
+    # Create a HARDCODED HEIGHT x WIDTH FP16 tensor (same on both TX and RX)
     np.random.seed(42)  # Fixed seed for reproducibility
     test_tensor = np.random.randn(HEIGHT, WIDTH).astype(np.float16)
     print(f"Test tensor shape: {test_tensor.shape}, dtype: {test_tensor.dtype}")
@@ -187,8 +184,7 @@ def send_mode(cam: Camera, grids: np.ndarray):
 def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
     """
     Receiver: Continuously capture frames and detect changes.
-    Captures grids immediately when significant change is detected (>300 cells).
-    Uses debouncing (3 frames min) to avoid capturing the same grid multiple times.
+    Wait for green start signal to end, then collect grids.
     """
     print("\n=== RECEIVE MODE ===")
     print(f"Expecting {c.grids_needed()} grids")
@@ -201,23 +197,13 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
     else:
         print("✓ Using calibrated colors for decoding")
 
-    print("\nControls:")
-    print("  SPACE - Start/restart collection")
-    print("  + - Decrease shutter speed (faster, less light)")
-    print("  - - Increase shutter speed (slower, more light)")
-    print("  0 - Auto exposure")
-    print("  Q - Quit")
-
-    # Initialize exposure control
-    if not cam.test_mode:
-        current_exposure = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
-        print(f"\nCurrent exposure: {current_exposure}")
-        if current_exposure < 0:
-            print("(Auto exposure enabled)")
+    print("Press SPACE to start waiting for GREEN start signal, Q to quit")
 
     collected_grids = []
     prev_frame_data = None
-    CHANGE_THRESHOLD = 200  # Number of cells that must differ to detect a new grid
+    frames_stable = 0
+    STABILITY_THRESHOLD = 3  # Need 3 stable frames before capturing
+    CHANGE_THRESHOLD = 50  # Number of cells that must differ to detect change
 
     # State machine: idle -> waiting_for_start -> collecting -> done
     state = "idle"
@@ -249,6 +235,7 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                 print("✓ Start signal ended, beginning collection!")
                 state = "collecting"
                 collected_grids = []
+                frames_stable = 0
                 prev_frame_data = current_data.copy()
 
         elif state == "collecting":
@@ -260,7 +247,7 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                 diff_count = np.sum(current_data != prev_frame_data)
 
                 if diff_count > CHANGE_THRESHOLD:
-                    # Major change detected - this is likely a new grid
+                    # Major change detected
                     if is_end_signal:
                         # Green end signal detected!
                         print(f"[END SIGNAL DETECTED] Stopping collection")
@@ -275,12 +262,17 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                             collected_grids = []
                             continue
                     else:
-                        # New grid detected - capture immediately
+                        # Regular frame change
+                        frames_stable = 0
                         unique, counts = np.unique(current_data, return_counts=True)
                         color_dist = dict(zip(unique, counts))
-                        print(f"[NEW GRID DETECTED] {diff_count} cells changed, colors: {color_dist}")
+                        print(f"[CHANGE DETECTED] {diff_count} cells changed, colors: {color_dist}")
+                else:
+                    # Frame is stable
+                    frames_stable += 1
 
-                        # Capture this grid
+                    # If stable enough and not end signal, capture it
+                    if frames_stable == STABILITY_THRESHOLD and not is_end_signal:
                         collected_grids.append(current_data.copy())
                         print(f"✓ Captured grid {len(collected_grids)}/{c.grids_needed()}")
                         print(f"  Stats: min={current_data.min()}, max={current_data.max()}, unique={len(np.unique(current_data))}")
@@ -336,6 +328,8 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                                 traceback.print_exc()
                                 state = "idle"
                                 collected_grids = []
+                        # Reset stable counter after successful capture
+                        frames_stable = 0
 
             prev_frame_data = current_data.copy()
 
@@ -367,31 +361,9 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                 # Start waiting for green start signal
                 state = "waiting_for_start"
                 collected_grids = []
-                frames_since_last_capture = 0
+                frames_stable = 0
                 prev_frame_data = None
                 print("\n[WAITING] Looking for GREEN start signal...")
-        elif key == ord('+') or key == ord('='):
-            # Decrease shutter speed (faster shutter, less exposure time)
-            if not cam.test_mode:
-                current = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
-                new_exposure = current - 1
-                cam.cap.set(cv2.CAP_PROP_EXPOSURE, new_exposure)
-                actual = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
-                print(f"\n[EXPOSURE] Decreased: {current} -> {actual} (faster shutter)")
-        elif key == ord('-') or key == ord('_'):
-            # Increase shutter speed (slower shutter, more exposure time)
-            if not cam.test_mode:
-                current = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
-                new_exposure = current + 1
-                cam.cap.set(cv2.CAP_PROP_EXPOSURE, new_exposure)
-                actual = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
-                print(f"\n[EXPOSURE] Increased: {current} -> {actual} (slower shutter)")
-        elif key == ord('0'):
-            # Set auto exposure
-            if not cam.test_mode:
-                cam.cap.set(cv2.CAP_PROP_EXPOSURE, -1)
-                actual = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
-                print(f"\n[EXPOSURE] Set to auto: {actual}")
 
 
 if __name__ == "__main__":

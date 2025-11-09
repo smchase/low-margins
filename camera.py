@@ -27,13 +27,11 @@ class Frame:
 class Camera:
     def __init__(self, test_mode: bool = False) -> None:
         self.test_mode = test_mode
-        # Display dimensions - 2:1 aspect ratio to match 64:32 grid
-        self.display_width = 3104  # 2x base size for 2:1 ratio
-        self.display_height = 1552  # base size
-        # Warp dimensions should match DATA AREA size (80% of display)
-        # This ensures perspective transform doesn't introduce scaling artifacts
-        self.warp_width = int(self.display_width * 0.8)  # 2483
-        self.warp_height = int(self.display_height * 0.8)  # 1241
+        # Maintain square cells by deriving width from grid aspect ratio
+        self.display_height = 1552
+        self.display_width = int(self.display_height * WIDTH / HEIGHT)
+        self.warp_height = 1552
+        self.warp_width = int(self.warp_height * WIDTH / HEIGHT)
         self.locked_corners: Optional[NDArray[np.float32]] = None
         self.warp_matrix: Optional[NDArray[np.float32]] = None
         self.test_camera_input: Optional[NDArray[np.uint8]] = None
@@ -51,8 +49,8 @@ class Camera:
             self.cap = cv2.VideoCapture(0)
             if not self.cap.isOpened():
                 raise RuntimeError("Could not open camera")
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1552)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1552)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.display_width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.display_height)
             print(
                 f"Camera resolution: "
                 f"{int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
@@ -88,7 +86,9 @@ class Camera:
 
     def _render_instructions(self, in_data_mode: bool = False) -> NDArray[np.uint8]:
         """Renders the instructions screen"""
-        img = np.ones((self.display_height, self.display_width, 3), dtype=np.uint8) * 255
+        height = self.display_height
+        width = self.display_width
+        img = np.ones((height, width, 3), dtype=np.uint8) * 255
 
         # Title
         cv2.putText(img, "CAMERA DATA LINK",
@@ -155,7 +155,10 @@ class Camera:
                 return self._render_color_calibration_pattern(self._transmit_color_idx)
             return self._render_instructions()
         elif self.display_mode == "receive_camera":
-            # Show camera feed - already 1000x1000
+            # Show camera feed scaled to display size for consistency
+            if (webcam_frame.shape[1] != self.display_width or
+                    webcam_frame.shape[0] != self.display_height):
+                return cv2.resize(webcam_frame, (self.display_width, self.display_height))
             return webcam_frame
         elif self.display_mode == "send_data":
             if self.display_data is not None:
@@ -302,29 +305,19 @@ class Camera:
                     print("Already completed receive calibration")
 
     def _render_calibration_boundary(self) -> NDArray[np.uint8]:
-        # Create wider image for 2:1 aspect ratio
-        img = np.ones((self.display_height, self.display_width, 3), dtype=np.uint8) * 255
-        marker_size = int(self.display_height * 0.15)  # 15% of height
-
-        # Data area boundaries (same as color pattern and data rendering)
-        data_start_y = int(self.display_height * 0.1)
-        data_start_x = int(self.display_width * 0.1)
-        data_height = int(self.display_height * 0.8)
-        data_width = int(self.display_width * 0.8)
-
+        width = self.display_width
+        height = self.display_height
+        marker_size = int(min(width, height) * 0.15)  # 15% of smaller dimension
+        padding_x = int(width * 0.1)
+        padding_y = int(height * 0.1)
+        img = np.ones((height, width, 3), dtype=np.uint8) * 255
         aruco_dict = cv2.aruco.getPredefinedDictionary(
             cv2.aruco.DICT_4X4_50)
-
-        # Position markers so their detected corners align with data area corners
-        # Marker 0: top-left corner at data top-left
-        # Marker 1: top-right corner at data top-right
-        # Marker 2: bottom-right corner at data bottom-right
-        # Marker 3: bottom-left corner at data bottom-left
         positions = [
-            (data_start_x, data_start_y),  # marker 0 top-left
-            (data_start_x + data_width - marker_size, data_start_y),  # marker 1 top-left
-            (data_start_x + data_width - marker_size, data_start_y + data_height - marker_size),  # marker 2 top-left
-            (data_start_x, data_start_y + data_height - marker_size),  # marker 3 top-left
+            (padding_x, padding_y),
+            (width - marker_size - padding_x, padding_y),
+            (width - marker_size - padding_x, height - marker_size - padding_y),
+            (padding_x, height - marker_size - padding_y),
         ]
 
         for marker_id, (x, y) in enumerate(positions):
@@ -409,24 +402,37 @@ class Camera:
         return (self.locked_corners is not None
                 and self.warp_matrix is not None)
 
+    def _compute_data_layout(self):
+        """
+        Returns (x_start, y_start, cell_size, data_width, data_height) for rendering.
+        Ensures square cells with 10% vertical padding and centered horizontally.
+        """
+        pad_y = int(self.display_height * 0.1)
+        usable_height = self.display_height - 2 * pad_y
+        cell_size = usable_height / HEIGHT
+        data_height = cell_size * HEIGHT
+        data_width = cell_size * WIDTH
+        pad_x = max(0, int(round((self.display_width - data_width) / 2)))
+        return pad_x, pad_y, cell_size, data_width, data_height
+
     def _render_color_calibration_pattern(
             self, color_idx: int) -> NDArray[np.uint8]:
         """Renders a full grid with all cells showing the same color."""
         img = np.ones((self.display_height, self.display_width, 3), dtype=np.uint8) * 255
 
-        data_start_y = int(self.display_height * 0.1)  # 10% padding
-        data_start_x = int(self.display_width * 0.1)  # 10% padding
-        data_height = int(self.display_height * 0.8)  # 80% for data
-        data_width = int(self.display_width * 0.8)  # 80% for data
+        x_start, y_start, cell_size, data_width, data_height = self._compute_data_layout()
+        x_start_int = int(round(x_start))
+        y_start_int = int(round(y_start))
+        x_end = min(self.display_width, int(round(x_start + data_width)))
+        y_end = min(self.display_height, int(round(y_start + data_height)))
 
         color = COLOR_MAP[color_idx]
-        img[data_start_y:data_start_y+data_height,
-            data_start_x:data_start_x+data_width] = color
+        img[y_start_int:y_end, x_start_int:x_end] = color
 
         return img
 
     def _capture_color_samples(self) -> NDArray[np.float32]:
-        """Captures BGR values for all grid positions from current frame.
+        """Captures BGR values for all 256 grid positions from current frame.
         Returns array of shape (HEIGHT, WIDTH, 3)."""
         if not self._is_calibrated():
             return np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
@@ -447,8 +453,8 @@ class Camera:
 
         for row in range(HEIGHT):
             for col in range(WIDTH):
-                y = int((row + 0.5) * cell_height)
-                x = int((col + 0.5) * cell_width)
+                y = min(self.warp_height - 1, int((row + 0.5) * cell_height))
+                x = min(self.warp_width - 1, int((col + 0.5) * cell_width))
                 samples[row, col] = unwarped[y, x].astype(np.float32)
 
         return samples
@@ -525,21 +531,15 @@ class Camera:
     def _render_data(self, frame: Frame) -> NDArray[np.uint8]:
         img = np.ones((self.display_height, self.display_width, 3), dtype=np.uint8) * 255
 
-        data_start_y = int(self.display_height * 0.1)  # 10% padding
-        data_start_x = int(self.display_width * 0.1)  # 10% padding
-        data_height = int(self.display_height * 0.8)  # 80% for data
-        data_width = int(self.display_width * 0.8)  # 80% for data
-
-        cell_width = data_width / WIDTH
-        cell_height = data_height / HEIGHT
+        x_start, y_start, cell_size, _, _ = self._compute_data_layout()
         for row in range(HEIGHT):
             for col in range(WIDTH):
                 value = frame.data[row, col]
                 color = COLOR_MAP[value]
-                y1 = int(data_start_y + row * cell_height)
-                y2 = int(data_start_y + (row + 1) * cell_height)
-                x1 = int(data_start_x + col * cell_width)
-                x2 = int(data_start_x + (col + 1) * cell_width)
+                y1 = min(self.display_height, int(round(y_start + row * cell_size)))
+                y2 = min(self.display_height, int(round(y_start + (row + 1) * cell_size)))
+                x1 = min(self.display_width, int(round(x_start + col * cell_size)))
+                x2 = min(self.display_width, int(round(x_start + (col + 1) * cell_size)))
                 img[y1:y2, x1:x2] = color
         return img
 
@@ -566,8 +566,8 @@ class Camera:
 
         for row in range(HEIGHT):
             for col in range(WIDTH):
-                y = int((row + 0.5) * cell_height)
-                x = int((col + 0.5) * cell_width)
+                y = min(self.warp_height - 1, int((row + 0.5) * cell_height))
+                x = min(self.warp_width - 1, int((col + 0.5) * cell_width))
                 pixel = unwarped[y, x].astype(np.float32)
 
                 min_dist = float('inf')
