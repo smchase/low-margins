@@ -520,8 +520,11 @@ class CodecTransmitterDisplay:
                 self.last_frame_time = now
                 self.remaining_start_frames -= 1
                 if self.remaining_start_frames == 0:
-                    print("[TX] Start signal complete, streaming data...")
-                    print(f"[TX] Starting with Grid 1")
+                    if self.current_stream_iteration == 0:
+                        print("[TX] Start signal complete, streaming data...")
+                        print(f"[TX] Starting with Grid 1")
+                    else:
+                        print(f"[TX STREAM] Pause complete, resuming tensor {self.current_stream_iteration+1} with Grid 1")
             return
 
         if now - self.last_frame_time >= self.frame_interval:
@@ -582,6 +585,7 @@ class CodecTransmitterDisplay:
                         # This helps RX distinguish between tensors
                         self.remaining_start_frames = max(2, int(self.fps * 0.5))  # 0.5 second pause
                         print(f"[TX STREAM] Pausing for {self.remaining_start_frames} frames between tensors...")
+                        print(f"[TX STREAM] After pause, will show Grid 1, Row 0, Col 0")
 
     def _current_slice_values(self):
         full_grid = self.encoded_grids[self.current_grid_idx]
@@ -631,6 +635,16 @@ class CodecTransmitterDisplay:
             # 5-color system: directly map grid values (0-4) to colors
             slice_values = self._current_slice_values()
             color_indices = slice_values  # Direct mapping, no bit extraction
+            
+            # Log progress in stream mode
+            if self.stream_count > 1:
+                frame_num = (self.current_grid_idx * self.num_row_slices * self.num_col_slices +
+                            self.current_row_slice * self.num_col_slices + 
+                            self.current_col_slice + 1)
+                if frame_num == 1 or frame_num == self.frames_per_iteration:
+                    unique_vals = np.unique(color_indices)
+                    print(f"[TX STREAM] Tensor {self.current_stream_iteration+1}, Frame {frame_num}/{self.frames_per_iteration}: "
+                          f"Grid {self.current_grid_idx+1}, unique colors: {unique_vals}, first row: {color_indices[0,:5]}")
                 
             # Debug: print unique color indices every few frames (only if verbose)
             if hasattr(self, 'debug_verbose') and self.debug_verbose:
@@ -1227,16 +1241,6 @@ def run_rx(args):
                     waiting_for_first_data_frame = False
                     print("\n[RX] Start signal complete - capturing data frames.")
                 
-                # In stream mode, detect inter-tensor pause (start signal between tensors)
-                if stream_mode and tensors_received > 0 and tensors_received < stream_count:
-                    if is_start_signal(pattern):
-                        print(f"[RX STREAM] Detected inter-tensor pause (start signal) - ignoring...")
-                        # Reset pending to avoid capturing pause frames
-                        pending_pattern = None
-                        pending_phase = None
-                        pending_consistency = 0
-                        phase_seen_time = None
-                        continue
                 if len(captured_frames) == 0:
                     if is_calibration_pattern(pattern):
                         continue
@@ -1244,6 +1248,18 @@ def run_rx(args):
                         # Still haven't seen the start signal; keep waiting
                         continue
 
+                # In stream mode, detect inter-tensor pause (start signal between tensors)
+                if stream_mode and tensors_received > 0 and tensors_received < stream_count:
+                    if is_start_signal(pattern):
+                        print(f"[RX STREAM] Detected inter-tensor pause - waiting for next tensor...")
+                        # Reset pending to avoid capturing pause frames
+                        pending_pattern = None
+                        pending_phase = None
+                        pending_consistency = 0
+                        phase_seen_time = None
+                        last_pattern = pattern.copy()  # Update so we detect when data resumes
+                        continue
+                
                 phase = classify_frame_phase(pattern)
                 if phase is None:
                     continue
@@ -1334,6 +1350,13 @@ def run_rx(args):
                         current_tensor_frames = captured_frames[start_idx:end_idx]
                         
                         print(f"\n[RX] Decoding tensor {tensors_received+1}/{stream_count} (frames {start_idx+1}-{end_idx})...")
+                        
+                        # Show what we're trying to decode
+                        print(f"[RX DECODE] Analyzing frames {start_idx+1}-{end_idx}:")
+                        for i, frame in enumerate(current_tensor_frames[:3], start=start_idx+1):
+                            uniq = np.unique(frame)
+                            print(f"  Frame {i}: unique={uniq}, corners=[{frame[0,0]},{frame[0,-1]},{frame[-1,0]},{frame[-1,-1]}]")
+                        
                         try:
                             # Debug: verify codec object
                             if not hasattr(codec_obj, 'grids_needed'):
