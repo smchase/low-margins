@@ -6,7 +6,7 @@ import numpy as np
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from camera import Camera, SECONDS_PER_FRAME  # noqa: E402
+from camera import Camera, SECONDS_PER_FRAME, RECEIVE_OFFSET  # noqa: E402
 from test_utils import (  # noqa: E402
     PhaseType, get_current_phase_info, wait_for_phase,
     generate_test_tensor, tensor_to_frames, frames_to_tensor,
@@ -189,9 +189,9 @@ def main():
                 log_status(f"WARNING: Phase changed during reception! Only received {frame_idx}/{FRAMES_PER_TENSOR} frames")
                 break
             
-            # Receive frame at midpoint of each frame period
+            # Receive frame with configured offset
             elapsed = time.time() - phase_start_time
-            target_time = (frame_idx + 0.5) * SECONDS_PER_FRAME
+            target_time = frame_idx * SECONDS_PER_FRAME + RECEIVE_OFFSET
             
             if elapsed >= target_time:
                 received_frame = cam.receive()

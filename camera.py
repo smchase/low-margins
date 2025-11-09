@@ -26,8 +26,8 @@ COLORS = [
     (255, 255, 0),   # 110 - yellow
     (255, 255, 255), # 111 - white
 ]
-SECONDS_PER_FRAME = 0.2
-RECEIVE_OFFSET = 0
+SECONDS_PER_FRAME = 1
+RECEIVE_OFFSET = 0.5
 
 
 class CalibrationState(enum.Enum):
