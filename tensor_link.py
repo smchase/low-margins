@@ -13,6 +13,11 @@ class TensorLink:
         self.tile_size = 16
         self.codec = codec(rows=self.tile_size, cols=self.tile_size, min_val=0, max_val=1)
         
+        # Special sync patterns (using values beyond binary 0/1 for detection)
+        # Since camera supports 0-7, we use higher values for control signals
+        self.START_PATTERN = 7  # All 7s = START signal
+        self.END_PATTERN = 6    # All 6s = END signal
+        
         print(f"TensorLink initialized: {self.codec.grids_needed()} frames per 16×16 tile")
     
     def grids_needed_per_tile(self) -> int:
@@ -22,6 +27,41 @@ class TensorLink:
         tiles_rows = (rows + self.tile_size - 1) // self.tile_size
         tiles_cols = (cols + self.tile_size - 1) // self.tile_size
         return tiles_rows, tiles_cols
+    
+    def _send_sync_frame(self, pattern_value: int, duration_ms: int = 500) -> None:
+        """Send a sync frame (START or END pattern) for specified duration."""
+        sync_frame = Frame(data=np.full((16, 16), pattern_value, dtype=np.int64))
+        
+        # Send sync pattern for duration to ensure it's captured
+        start_time = time.time()
+        while (time.time() - start_time) * 1000 < duration_ms:
+            self.camera.send(sync_frame)
+            self.camera.update()
+            time.sleep(0.03)  # ~30fps
+    
+    def _wait_for_sync_frame(self, pattern_value: int, timeout_sec: int = 60) -> bool:
+        """Wait for a sync frame (START or END). Returns True if detected, False on timeout."""
+        print(f"Waiting for sync signal (pattern={pattern_value})...")
+        start_time = time.time()
+        
+        while (time.time() - start_time) < timeout_sec:
+            frame = self.camera.receive()
+            
+            # Check if this is the sync pattern (most cells match the pattern)
+            matches = np.sum(frame.data == pattern_value)
+            total_cells = frame.data.size
+            
+            # If >90% of cells match the pattern, it's a sync frame
+            if matches > (0.9 * total_cells):
+                print(f"✓ Sync signal detected!")
+                return True
+            
+            # Update display to keep responsive
+            self.camera.update()
+            time.sleep(0.03)
+        
+        print(f"✗ Timeout waiting for sync signal")
+        return False
     
     def send_tensor(self, tensor: torch.Tensor) -> None:
         if len(tensor.shape) != 2:
@@ -61,6 +101,11 @@ class TensorLink:
         print(f"  Tiles: {tiles_rows}×{tiles_cols} = {total_tiles} tiles")
         print(f"  Total frames: {total_frames}")
         
+        # HANDSHAKE: Send START signal
+        print("Sending START signal...")
+        self._send_sync_frame(self.START_PATTERN, duration_ms=2000)
+        time.sleep(0.3)  # Brief pause after START
+        
         frame_count = 0
         
         # Process each tile
@@ -92,16 +137,22 @@ class TensorLink:
                     if frame_count % 10 == 0 or frame_count == total_frames:
                         print(f"  Sent frame {frame_count}/{total_frames}")
         
-        print("Tensor transmission complete!")
+        # HANDSHAKE: Send END signal
+        print("Sending END signal...")
+        self._send_sync_frame(self.END_PATTERN, duration_ms=2000)
+        
+        print("✓ Tensor transmission complete!")
     
-    def receive_tensor(self, rows: int, cols: int, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+    def receive_tensor(self, rows: int, cols: int, dtype: torch.dtype = torch.bfloat16, timeout_sec: int = 60) -> torch.Tensor:
         """
         Receive a PyTorch tensor via camera over multiple frames.
+        Waits for START signal before beginning reception.
         
         Args:
             rows: Original number of rows in the tensor
             cols: Original number of columns in the tensor
             dtype: Target dtype (default: torch.bfloat16)
+            timeout_sec: How long to wait for START signal (default: 60s)
             
         Returns:
             Tensor of shape (rows, cols) with specified dtype
@@ -114,6 +165,12 @@ class TensorLink:
         print(f"Receiving {rows}×{cols} tensor:")
         print(f"  Tiles: {tiles_rows}×{tiles_cols} = {total_tiles} tiles")
         print(f"  Total frames: {total_frames}")
+        
+        # HANDSHAKE: Wait for START signal
+        if not self._wait_for_sync_frame(self.START_PATTERN, timeout_sec=timeout_sec):
+            raise TimeoutError("Failed to receive START signal")
+        
+        time.sleep(0.3)  # Brief pause after detecting START
         
         # Padded dimensions
         padded_rows = tiles_rows * self.tile_size
@@ -130,7 +187,12 @@ class TensorLink:
                 received_grids = []
                 for i in range(frames_per_tile):
                     frame = self.camera.receive()
-                    received_grids.append(frame.data)
+                    
+                    # Threshold to binary: 0-3 → 0, 4-7 → 1
+                    # This handles noise and ensures values are in codec range [0, 1]
+                    binary_data = (frame.data >= 4).astype(np.int64)
+                    received_grids.append(binary_data)
+                    
                     frame_count += 1
                     
                     if frame_count % 10 == 0 or frame_count == total_frames:
@@ -161,7 +223,14 @@ class TensorLink:
             if dtype != torch.float16:
                 tensor = tensor.to(dtype)
         
-        print("Tensor reception complete!")
+        # HANDSHAKE: Wait for END signal (optional, for confirmation)
+        print("Waiting for END signal...")
+        if self._wait_for_sync_frame(self.END_PATTERN, timeout_sec=10):
+            print("✓ END signal confirmed")
+        else:
+            print("⚠ END signal not detected (might be ok)")
+        
+        print("✓ Tensor reception complete!")
         return tensor
 
 
