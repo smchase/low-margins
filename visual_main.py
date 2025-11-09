@@ -442,21 +442,24 @@ def compute_slice_layout(rows, cols, grid_size):
 class CodecTransmitterDisplay:
     """Full-screen transmitter that cycles codec grids using 5-color encoding."""
 
-    def __init__(self, tensor, grid_size, fps, start_signal_seconds=1.0):
+    def __init__(self, tensor, grid_size, fps, start_signal_seconds=1.0, stream_count=1):
         self.tensor = tensor
         self.grid_size = grid_size
         self.fps = max(fps, 1e-6)
         self.rows, self.cols = tensor.shape
         self.codec = codec(self.rows, self.cols, min_val=CODEC_MIN_VAL, max_val=CODEC_MAX_VAL)
         self.encoded_grids = self.codec.encode(tensor)
+        self.stream_count = max(1, stream_count)  # Number of times to transmit
+        self.current_stream_iteration = 0
 
         layout = compute_slice_layout(self.rows, self.cols, self.grid_size)
         (self.rows_per_slice, self.cols_per_slice,
          self.num_row_slices, self.num_col_slices) = layout
         # 5-color system: no phases, just direct grid display
-        self.total_frames = (self.encoded_grids.shape[0] *
-                             self.num_row_slices *
-                             self.num_col_slices)
+        self.frames_per_iteration = (self.encoded_grids.shape[0] *
+                                      self.num_row_slices *
+                                      self.num_col_slices)
+        self.total_frames = self.frames_per_iteration * self.stream_count
 
         self.cell_size = 24
         self.border = 40
@@ -478,17 +481,31 @@ class CodecTransmitterDisplay:
         self.current_grid_idx = 0
         self.current_row_slice = 0
         self.current_col_slice = 0
+        self.current_stream_iteration = 0
         self.flash_counter = 0
         self.last_frame_time = _time.time()
         self.remaining_start_frames = 0
+        self.transmission_start_time = None
 
     def start_transmission(self):
+        import time as _time
         self.reset_state()
         self.transmitting = True
         self.done = False
         self.remaining_start_frames = self.start_signal_frames
-        print(f"\n[TX] Starting auto-transmission at {self.fps:.2f} FPS "
-              f"({self.total_frames} frames)")
+        self.transmission_start_time = _time.time()
+        
+        tensor_bytes = self.rows * self.cols * 2  # FP16 = 2 bytes per value
+        total_bytes = tensor_bytes * self.stream_count
+        
+        print(f"\n[TX] Starting auto-transmission at {self.fps:.2f} FPS")
+        if self.stream_count > 1:
+            print(f"[TX] Stream mode: {self.stream_count} tensors × {tensor_bytes} bytes = {total_bytes} bytes ({total_bytes/1024:.2f} KB)")
+            print(f"[TX] Each tensor: {self.rows}×{self.cols} = {self.rows*self.cols} FP16 values")
+            print(f"[TX] Frames per tensor: {self.frames_per_iteration}, Total frames: {self.total_frames}")
+        else:
+            print(f"[TX] Single tensor: {tensor_bytes} bytes ({tensor_bytes/1024:.2f} KB)")
+            print(f"[TX] Total frames: {self.total_frames}")
         print(f"[TX] First data frame will be Grid 1 (5-color system: colors 0-4)")
 
     def update(self):
@@ -523,9 +540,29 @@ class CodecTransmitterDisplay:
                 self.current_grid_idx += 1
 
                 if self.current_grid_idx >= self.encoded_grids.shape[0]:
-                    self.done = True
-                    print("\n[TX] ✓ All frames transmitted. Showing DONE frame.")
-                    return
+                    # Finished one iteration
+                    self.current_stream_iteration += 1
+                    
+                    if self.current_stream_iteration >= self.stream_count:
+                        # All iterations complete
+                        self.done = True
+                        import time as _time
+                        elapsed = _time.time() - self.transmission_start_time
+                        tensor_bytes = self.rows * self.cols * 2
+                        total_bytes = tensor_bytes * self.stream_count
+                        throughput_kbps = (total_bytes / 1024) / elapsed if elapsed > 0 else 0
+                        
+                        print(f"\n[TX] ✓ All transmissions complete!")
+                        if self.stream_count > 1:
+                            print(f"[TX] Transmitted: {self.stream_count} tensors × {tensor_bytes} bytes = {total_bytes} bytes ({total_bytes/1024:.2f} KB)")
+                            print(f"[TX] Time: {elapsed:.2f} seconds")
+                            print(f"[TX] Throughput: {throughput_kbps:.2f} KB/s ({throughput_kbps*8:.2f} Kbps)")
+                            print(f"[TX] Avg per tensor: {elapsed/self.stream_count:.2f} seconds")
+                        return
+                    else:
+                        # Start next iteration
+                        self.current_grid_idx = 0
+                        print(f"\n[TX] Iteration {self.current_stream_iteration}/{self.stream_count} complete, starting next tensor...")
 
     def _current_slice_values(self):
         full_grid = self.encoded_grids[self.current_grid_idx]
@@ -785,6 +822,10 @@ def load_tensor(args):
 
     rng = np.random.default_rng(args.seed)
     tensor = rng.standard_normal((args.rows, args.cols)).astype(np.float16)
+    print(f"[TX] Generated random tensor with seed={args.seed}")
+    print(f"[TX] Stats: min={tensor.min():.3f}, max={tensor.max():.3f}, mean={tensor.mean():.3f}, std={tensor.std():.3f}")
+    print(f"[TX] First row (5 vals): {tensor[0, :5]}")
+    print(f"[TX] Hint: Use --verify-random --seed {args.seed} on RX to verify transmission")
     return tensor
 
 
@@ -916,7 +957,8 @@ def compare_captured_to_expected(captured_frames, expected_frames):
 
 def run_tx(args):
     tensor = load_tensor(args)
-    tx = CodecTransmitterDisplay(tensor, args.grid_size, args.fps, args.start_signal_seconds)
+    stream_count = args.stream_count if hasattr(args, 'stream_count') and args.stream_count else 1
+    tx = CodecTransmitterDisplay(tensor, args.grid_size, args.fps, args.start_signal_seconds, stream_count=stream_count)
 
     cv2.namedWindow("Codec TX", cv2.WINDOW_NORMAL)
     cv2.setWindowProperty("Codec TX", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
@@ -977,7 +1019,9 @@ def run_rx(args):
         raise TypeError(f"Failed to create codec object: got {type(codec_obj)}")
     layout = compute_slice_layout(args.rows, args.cols, args.grid_size)
     # 5-color system: no phases, so just 1 frame per slice
-    total_frames_needed = codec_obj.grids_needed() * layout[2] * layout[3]
+    frames_per_tensor = codec_obj.grids_needed() * layout[2] * layout[3]
+    stream_count = args.stream_count if hasattr(args, 'stream_count') and args.stream_count else 1
+    total_frames_needed = frames_per_tensor * stream_count
 
     captured_frames = []
     capture_active = False
@@ -998,13 +1042,27 @@ def run_rx(args):
     start_signal_wait_start = 0.0
     start_signal_wait_logged = False
     expected_frames = None
-    if args.debug_frame_compare:
+    
+    # Stream mode tracking
+    tensors_received = 0
+    stream_start_time = None
+    frames_per_tensor = frames_per_tensor
+    stream_mode = stream_count > 1
+    if args.debug_frame_compare or args.verify_random:
         reference_tensor = None
         if args.color_test_pattern:
             reference_tensor = create_color_test_pattern_tensor(args.rows, args.cols)
             print(f"[RX] Using color test pattern as reference for frame comparison")
             print(f"[RX] Reference first row: {reference_tensor[0, :min(10, args.cols)]}")
             print(f"[RX] Reference value range: [{reference_tensor.min():.3f}, {reference_tensor.max():.3f}]")
+        elif args.verify_random:
+            # Generate the same random tensor as TX using the seed
+            rng = np.random.default_rng(args.seed)
+            reference_tensor = rng.standard_normal((args.rows, args.cols)).astype(np.float16)
+            print(f"[RX] Generated reference random tensor with seed={args.seed}")
+            print(f"[RX] Reference shape: {reference_tensor.shape}")
+            print(f"[RX] Reference stats: min={reference_tensor.min():.3f}, max={reference_tensor.max():.3f}, mean={reference_tensor.mean():.3f}")
+            print(f"[RX] First row (5 vals): {reference_tensor[0, :5]}")
         elif args.verify_test_pattern:
             reference_tensor = create_test_pattern_tensor(args.rows, args.cols)
         elif args.tensor:
@@ -1032,8 +1090,13 @@ def run_rx(args):
     if args.rows != args.grid_size or args.cols != args.grid_size:
         print(f"⚠️  WARNING: Tensor size != grid size. TX must use same --grid-size!")
         print(f"   Suggestion: Add --grid-size {args.rows} to BOTH tx and rx commands")
-    print(f"Expecting {total_frames_needed} frames "
-          f"({codec_obj.grids_needed()} grids × {layout[2]} row slices × {layout[3]} col slices)")
+    
+    if stream_count > 1:
+        print(f"Stream mode: expecting {stream_count} tensors ({total_frames_needed} total frames)")
+        print(f"  Frames per tensor: {frames_per_tensor} ({codec_obj.grids_needed()} grids × {layout[2]} row × {layout[3]} col)")
+    else:
+        print(f"Expecting {total_frames_needed} frames "
+              f"({codec_obj.grids_needed()} grids × {layout[2]} row slices × {layout[3]} col slices)")
     print("Controls:")
     print("  c   - Calibrate (lock onto TX grid)")
     print("  p   - Start capture (after calibration)")
@@ -1201,6 +1264,9 @@ def run_rx(args):
                     # Don't enforce strict phase alternation - just track what we captured
 
                     if total_captured >= total_frames_needed:
+                        if stream_start_time is None:
+                            stream_start_time = time.time()
+                        
                         print("\n[RX] Frames collected - decoding...")
                         try:
                             # Debug: verify codec object
@@ -1244,6 +1310,50 @@ def run_rx(args):
                             # If test pattern mode, verify known values
                             if args.color_test_pattern:
                                 verify_color_test_pattern(decoded_tensor, args.rows, args.cols)
+                            elif args.verify_random:
+                                # Verify against the deterministic random tensor
+                                print("\n[RX VERIFY] Verifying against deterministic random tensor...")
+                                rng = np.random.default_rng(args.seed)
+                                expected = rng.standard_normal((args.rows, args.cols)).astype(np.float16)
+                                
+                                # Bit-exact comparison
+                                expected_u16 = expected.view(np.uint16)
+                                decoded_u16 = decoded_tensor.view(np.uint16)
+                                matches = np.sum(expected_u16 == decoded_u16)
+                                total = expected.size
+                                accuracy = matches / total * 100 if total > 0 else 0
+                                
+                                print(f"[RX VERIFY] Expected (seed={args.seed}): shape={expected.shape}")
+                                print(f"[RX VERIFY] Expected stats: min={expected.min():.3f}, max={expected.max():.3f}, mean={expected.mean():.3f}")
+                                print(f"[RX VERIFY] Decoded stats:  min={decoded_tensor.min():.3f}, max={decoded_tensor.max():.3f}, mean={decoded_tensor.mean():.3f}")
+                                print(f"[RX VERIFY] Expected first row (5 vals): {expected[0, :5]}")
+                                print(f"[RX VERIFY] Decoded first row (5 vals):  {decoded_tensor[0, :5]}")
+                                print(f"[RX VERIFY] Bit-exact matches: {matches}/{total} ({accuracy:.2f}%)")
+                                
+                                if accuracy == 100.0:
+                                    print("[RX VERIFY] ✅ Perfect match! Random tensor transmitted correctly.")
+                                elif accuracy > 99.0:
+                                    print(f"[RX VERIFY] ✅ Nearly perfect ({accuracy:.2f}%)")
+                                    # Show a few mismatches
+                                    mismatches = np.where(expected_u16 != decoded_u16)
+                                    if len(mismatches[0]) > 0:
+                                        print(f"[RX VERIFY] Sample mismatches (showing up to 5):")
+                                        for idx in range(min(5, len(mismatches[0]))):
+                                            i, j = mismatches[0][idx], mismatches[1][idx]
+                                            exp_val = expected[i, j]
+                                            dec_val = decoded_tensor[i, j]
+                                            print(f"  [{i},{j}]: decoded={dec_val:.6f}, expected={exp_val:.6f}")
+                                else:
+                                    print(f"[RX VERIFY] ⚠️  Only {accuracy:.2f}% match - transmission errors detected")
+                                    # Show some mismatches
+                                    mismatches = np.where(expected_u16 != decoded_u16)
+                                    if len(mismatches[0]) > 0:
+                                        print(f"[RX VERIFY] Sample mismatches (showing up to 10):")
+                                        for idx in range(min(10, len(mismatches[0]))):
+                                            i, j = mismatches[0][idx], mismatches[1][idx]
+                                            exp_val = expected[i, j]
+                                            dec_val = decoded_tensor[i, j]
+                                            print(f"  [{i},{j}]: decoded={dec_val:.3f}, expected={exp_val:.3f}")
                             elif args.verify_test_pattern:
                                 print("\n[RX] Verifying test pattern values...")
                                 expected = create_test_pattern_tensor(args.rows, args.cols)
@@ -1276,17 +1386,56 @@ def run_rx(args):
                                     print("[RX] ⚠️  Some test values didn't match")
                             
                             if args.save_decoded:
-                                np.save(args.save_decoded, decoded_tensor)
-                                print(f"[RX] Saved tensor to {args.save_decoded}")
+                                if stream_mode:
+                                    # Save with iteration number
+                                    base_name = args.save_decoded.replace('.npy', '')
+                                    save_path = f"{base_name}_tensor{tensors_received}.npy"
+                                    np.save(save_path, decoded_tensor)
+                                    print(f"[RX] Saved tensor {tensors_received} to {save_path}")
+                                else:
+                                    np.save(args.save_decoded, decoded_tensor)
+                                    print(f"[RX] Saved tensor to {args.save_decoded}")
+                            
+                            # Stream mode: count received tensors
+                            tensors_received += 1
+                            
+                            if stream_mode:
+                                elapsed = time.time() - stream_start_time
+                                tensor_bytes = args.rows * args.cols * 2
+                                total_bytes = tensor_bytes * tensors_received
+                                throughput_kbps = (total_bytes / 1024) / elapsed if elapsed > 0 else 0
+                                
+                                print(f"\n[RX STREAM] ═══ Tensor {tensors_received}/{stream_count} received ═══")
+                                print(f"[RX STREAM] Total data: {total_bytes} bytes ({total_bytes/1024:.2f} KB)")
+                                print(f"[RX STREAM] Elapsed: {elapsed:.2f} seconds")
+                                print(f"[RX STREAM] Throughput: {throughput_kbps:.2f} KB/s ({throughput_kbps*8:.2f} Kbps)")
+                                print(f"[RX STREAM] Avg per tensor: {elapsed/tensors_received:.2f} seconds")
+                                
+                                if tensors_received >= stream_count:
+                                    print(f"\n[RX STREAM] ✅ All {stream_count} tensors received successfully!")
+                                    print(f"[RX STREAM] Final throughput: {throughput_kbps:.2f} KB/s ({throughput_kbps*8:.2f} Kbps)")
+                                    capture_active = False
+                                else:
+                                    # Continue capturing next tensor
+                                    print(f"[RX STREAM] Waiting for tensor {tensors_received+1}/{stream_count}...")
+                                    captured_frames.clear()
+                                    last_pattern = None
+                                    pending_pattern = None
+                                    pending_phase = None
+                                    pending_consistency = 0
+                                    phase_seen_time = None
+                                    continue
                         except Exception as err:
                             print(f"[RX] ✗ Decode failed: {err}")
-                        capture_active = False
-                        phase_seen_time = None
-                        waiting_for_start_signal = False
-                        waiting_for_first_data_frame = False
-                        start_signal_detected = False
-                        start_signal_wait_start = 0.0
-                        start_signal_wait_logged = False
+                        
+                        if not stream_mode or tensors_received >= stream_count:
+                            capture_active = False
+                            phase_seen_time = None
+                            waiting_for_start_signal = False
+                            waiting_for_first_data_frame = False
+                            start_signal_detected = False
+                            start_signal_wait_start = 0.0
+                            start_signal_wait_logged = False
             else:
                 capture_active = False
                 last_pattern = None
@@ -1431,6 +1580,8 @@ def build_arg_parser():
     parser.add_argument('--fps', type=float, default=TRANSMISSION_FPS, help='TX frames per second')
     parser.add_argument('--start-signal-seconds', type=float, default=1.0,
                         help='Duration to show solid green start signal before frames')
+    parser.add_argument('--stream-count', type=int, default=1,
+                        help='Number of tensors to transmit in stream mode (calculates throughput)')
     parser.add_argument('--rows', type=int, default=TEST_TENSOR_ROWS, help='Tensor rows')
     parser.add_argument('--cols', type=int, default=TEST_TENSOR_COLS, help='Tensor cols')
     parser.add_argument('--tensor', type=str, help='Path to .npy tensor for TX mode')
@@ -1457,6 +1608,8 @@ def build_arg_parser():
                         help='Minimum seconds between frame captures (RX)')
     parser.add_argument('--verify-test-pattern', action='store_true',
                         help='Verify decoded tensor against test pattern (RX, deprecated - use --test-pattern instead)')
+    parser.add_argument('--verify-random', action='store_true',
+                        help='Verify decoded tensor against deterministic random (use same --seed as TX)')
     parser.add_argument('--flip-horizontal', action='store_true',
                         help='Enable horizontal flip for facing cameras (RX)')
     parser.add_argument('--skip-start-signal', action='store_true',
