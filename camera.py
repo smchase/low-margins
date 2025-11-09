@@ -39,10 +39,6 @@ class Camera:
         self.test_camera_input: Optional[NDArray[np.uint8]] = None
         self.calibrated_colors: Optional[NDArray[np.float32]] = None
 
-        # Temporal averaging for noise reduction
-        self.prev_pixel_avg: Optional[NDArray[np.float32]] = None  # (HEIGHT, WIDTH, 3)
-        self.prev_decoded_data: Optional[NDArray[np.int64]] = None  # (HEIGHT, WIDTH)
-
         # Calibration status
         self.receive_calibration_done = False
         self.transmit_calibration_done = False
@@ -543,7 +539,7 @@ class Camera:
 
     def _capture_color_samples(self) -> NDArray[np.float32]:
         """Captures BGR values for all grid positions from current frame.
-        Samples ALL pixels in each cell and averages them for maximum noise reduction.
+        Uses robust sampling: central region, Gaussian blur, median filter.
         Returns array of shape (HEIGHT, WIDTH, 3)."""
         if not self._is_calibrated():
             return np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
@@ -559,8 +555,10 @@ class Camera:
                 return np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
             self._update_capture_dimensions(frame)
 
+        # Warp with better interpolation flags
         unwarped = cv2.warpPerspective(
-            frame, self.warp_matrix, (self.warp_width, self.warp_height))
+            frame, self.warp_matrix, (self.warp_width, self.warp_height),
+            flags=cv2.INTER_LINEAR)
 
         cell_width = self.warp_width / WIDTH
         cell_height = self.warp_height / HEIGHT
@@ -580,9 +578,36 @@ class Camera:
                 x1 = max(0, x1)
                 x2 = min(self.warp_width, x2)
 
-                # Extract all pixels in this cell and average them
-                cell_pixels = unwarped[y1:y2, x1:x2]
-                samples[row, col] = np.mean(cell_pixels, axis=(0, 1)).astype(np.float32)
+                # Extract the full cell
+                cell = unwarped[y1:y2, x1:x2]
+
+                if cell.size == 0:
+                    continue
+
+                # Sample central 40-60% region to avoid edge artifacts
+                cell_h, cell_w = cell.shape[:2]
+                margin_h = int(cell_h * 0.2)  # 20% margin on each side = 60% center
+                margin_w = int(cell_w * 0.2)
+                center_y1 = margin_h
+                center_y2 = cell_h - margin_h
+                center_x1 = margin_w
+                center_x2 = cell_w - margin_w
+
+                if center_y2 <= center_y1 or center_x2 <= center_x1:
+                    # Cell too small, use whole cell
+                    center_region = cell
+                else:
+                    center_region = cell[center_y1:center_y2, center_x1:center_x2]
+
+                # Apply Gaussian blur to handle subpixel structure
+                if center_region.shape[0] >= 5 and center_region.shape[1] >= 5:
+                    blurred = cv2.GaussianBlur(center_region, (5, 5), 0)
+                else:
+                    blurred = center_region
+
+                # Use median instead of mean (rejects noise, highlights, moiré)
+                median_pixel = np.median(blurred, axis=(0, 1)).astype(np.float32)
+                samples[row, col] = median_pixel
 
         return samples
 
@@ -687,27 +712,17 @@ class Camera:
                 return Frame(data=np.zeros((HEIGHT, WIDTH), dtype=np.int64))
             self._update_capture_dimensions(frame)
 
+        # Warp with better interpolation flags
         unwarped = cv2.warpPerspective(
-            frame, self.warp_matrix, (self.warp_width, self.warp_height))
+            frame, self.warp_matrix, (self.warp_width, self.warp_height),
+            flags=cv2.INTER_LINEAR)
 
         cell_width = self.warp_width / WIDTH
         cell_height = self.warp_height / HEIGHT
-
-        # Initialize temporal buffers on first call
-        if self.prev_pixel_avg is None:
-            self.prev_pixel_avg = np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
-            self.prev_decoded_data = np.zeros((HEIGHT, WIDTH), dtype=np.int64)
-
-        data = self.prev_decoded_data.copy()  # Start with previous frame
-        current_pixel_avg = np.zeros((HEIGHT, WIDTH, 3), dtype=np.float32)
+        data = np.zeros((HEIGHT, WIDTH), dtype=np.int64)
 
         # Use calibrated colors if available, otherwise use COLOR_MAP
         use_calibrated = self.calibrated_colors is not None
-
-        # Threshold: only update if pixel changed by 75% or more
-        # Max squared distance in BGR space: (255-0)^2 + (255-0)^2 + (255-0)^2 = 195,075
-        # 75% of that is ~146,306
-        CHANGE_THRESHOLD_SQ = 195075 * 0.75  # 75% of max squared distance
 
         for row in range(HEIGHT):
             for col in range(WIDTH):
@@ -723,42 +738,66 @@ class Camera:
                 x1 = max(0, x1)
                 x2 = min(self.warp_width, x2)
 
-                # Extract all pixels in this cell and average them
-                cell_pixels = unwarped[y1:y2, x1:x2]
-                avg_pixel = np.mean(cell_pixels, axis=(0, 1)).astype(np.float32)
-                current_pixel_avg[row, col] = avg_pixel
+                # Extract the full cell
+                cell = unwarped[y1:y2, x1:x2]
 
-                # Calculate temporal difference from previous frame
-                pixel_diff_sq = np.sum((avg_pixel - self.prev_pixel_avg[row, col]) ** 2)
+                if cell.size == 0:
+                    continue
 
-                # Only update if change is significant (>75% different)
-                if pixel_diff_sq > CHANGE_THRESHOLD_SQ:
-                    # Find the closest color
-                    min_dist = float('inf')
-                    best_idx = 0
+                # Sample central 40-60% region to avoid edge artifacts
+                cell_h, cell_w = cell.shape[:2]
+                margin_h = int(cell_h * 0.2)  # 20% margin on each side = 60% center
+                margin_w = int(cell_w * 0.2)
+                center_y1 = margin_h
+                center_y2 = cell_h - margin_h
+                center_x1 = margin_w
+                center_x2 = cell_w - margin_w
 
-                    if use_calibrated:
-                        # Compare to calibrated colors for this position
-                        for idx in range(len(COLOR_MAP)):
-                            color_ref = self.calibrated_colors[row, col, idx]
-                            dist = np.sum((avg_pixel - color_ref) ** 2)
-                            if dist < min_dist:
-                                min_dist = dist
-                                best_idx = idx
-                    else:
-                        # Compare to ideal COLOR_MAP
-                        for idx, color in enumerate(COLOR_MAP):
-                            dist = np.sum((avg_pixel - np.array(color)) ** 2)
-                            if dist < min_dist:
-                                min_dist = dist
-                                best_idx = idx
+                if center_y2 <= center_y1 or center_x2 <= center_x1:
+                    # Cell too small, use whole cell
+                    center_region = cell
+                else:
+                    center_region = cell[center_y1:center_y2, center_x1:center_x2]
 
-                    data[row, col] = best_idx
-                # else: keep previous decoded value (no update)
+                # Apply Gaussian blur to handle subpixel structure
+                if center_region.shape[0] >= 5 and center_region.shape[1] >= 5:
+                    blurred = cv2.GaussianBlur(center_region, (5, 5), 0)
+                else:
+                    blurred = center_region
 
-        # Update temporal buffers
-        self.prev_pixel_avg = current_pixel_avg
-        self.prev_decoded_data = data
+                # Use median instead of mean (rejects noise, highlights, moiré)
+                median_pixel = np.median(blurred, axis=(0, 1)).astype(np.uint8)
+
+                # Convert to LAB color space for perceptually-accurate classification
+                # LAB space removes camera pipeline biases
+                median_pixel_rgb = median_pixel.reshape(1, 1, 3)
+                lab_pixel = cv2.cvtColor(median_pixel_rgb, cv2.COLOR_BGR2LAB)[0, 0].astype(np.float32)
+
+                # Find the closest color using LAB distance
+                min_dist = float('inf')
+                best_idx = 0
+
+                if use_calibrated:
+                    # Compare to calibrated colors in LAB space
+                    for idx in range(len(COLOR_MAP)):
+                        color_ref_bgr = self.calibrated_colors[row, col, idx].astype(np.uint8)
+                        color_ref_rgb = color_ref_bgr.reshape(1, 1, 3)
+                        color_ref_lab = cv2.cvtColor(color_ref_rgb, cv2.COLOR_BGR2LAB)[0, 0].astype(np.float32)
+                        dist = np.sum((lab_pixel - color_ref_lab) ** 2)
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_idx = idx
+                else:
+                    # Compare to ideal COLOR_MAP in LAB space
+                    for idx, color in enumerate(COLOR_MAP):
+                        color_bgr = np.array(color, dtype=np.uint8).reshape(1, 1, 3)
+                        color_lab = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2LAB)[0, 0].astype(np.float32)
+                        dist = np.sum((lab_pixel - color_lab) ** 2)
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_idx = idx
+
+                data[row, col] = best_idx
 
         return Frame(data=data)
 
