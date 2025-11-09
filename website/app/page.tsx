@@ -216,23 +216,12 @@ export default function MnistPage() {
       : 0;
 
   return (
-    <div className="mx-auto flex flex-col gap-6 px-6 py-10">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-semibold text-slate-900">
-            MNIST Browser Inference
+    <div className="mx-auto flex flex-col gap-2 px-6 py-10">
+      <header className="flex flex-wrap items-center justify-center gap-4">
+        <div className="text-center">
+          <h1 className="text-5xl font-semibold text-slate-900">
+            wccl 🎥
           </h1>
-          <p className="text-sm text-slate-600">
-            {status === "done"
-              ? `Ran ${items.length} samples from t10k.`
-              : status === "ready"
-                ? `Loaded ${items.length} samples. Click "Simulate Training Steps" to start.`
-                : status === "running inference…"
-                  ? currentStep
-                    ? `Running inference with ${currentStep}...`
-                    : "Running inference…"
-                  : "Loading model & dataset…"}
-          </p>
         </div>
         <button
           onClick={simulateSteps}
@@ -246,16 +235,17 @@ export default function MnistPage() {
         </button>
       </header>
 
-      <div className="flex items-center gap-3">
-        <div className="rounded-lg bg-slate-100 px-4 py-2 text-sm text-slate-900 ring-1 ring-slate-300">
+      <div className="flex flex-col items-center justify-center mb-8">
+        <div className="rounded-lg px-4 py-1 text-lg text-slate-900">
           Accuracy:{" "}
           <span
             className={
-              accuracy >= 90
+              "font-semibold " +
+              (accuracy >= 80
                 ? "text-green-600"
-                : accuracy >= 70
-                  ? "text-yellow-600"
-                  : "text-red-600"
+                : accuracy >= 50
+                ? "text-yellow-600"
+                : "text-red-600")
             }
           >
             {accuracy}%
@@ -267,14 +257,14 @@ export default function MnistPage() {
       </div>
 
       {/* grid of images */}
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))] gap-1">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(80px,1fr))] gap-2">
         {items.map((item, idx) => {
           const hasPrediction = item.pred !== -1;
           const correct = hasPrediction && item.label === item.pred;
           return (
             <div
               key={item.id + "-" + idx}
-              className={`aspect-square w-20 h-20 border-8 ${!hasPrediction
+              className={`aspect-square w-20 h-20 border-4 ${!hasPrediction
                 ? "border-slate-300"
                 : correct
                   ? "border-green-500"
