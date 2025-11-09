@@ -10,23 +10,12 @@ class TensorLink:
         self.camera = camera
         self.frame_delay_ms = frame_delay_ms
         
-        self.tile_size = 16
-        self.codec = codec(rows=self.tile_size, cols=self.tile_size, min_val=0, max_val=1)
-        
         # Special sync patterns (using values beyond binary 0/1 for detection)
         # Since camera supports 0-7, we use higher values for control signals
         self.START_PATTERN = 7  # All 7s = START signal
         self.END_PATTERN = 6    # All 6s = END signal
         
-        print(f"TensorLink initialized: {self.codec.grids_needed()} frames per 16×16 tile")
-    
-    def grids_needed_per_tile(self) -> int:
-        return self.codec.grids_needed()
-    
-    def _calculate_num_tiles(self, rows: int, cols: int) -> tuple:
-        tiles_rows = (rows + self.tile_size - 1) // self.tile_size
-        tiles_cols = (cols + self.tile_size - 1) // self.tile_size
-        return tiles_rows, tiles_cols
+        print(f"TensorLink initialized")
     
     def _send_sync_frame(self, pattern_value: int, duration_ms: int = 500) -> None:
         """Send a sync frame (START or END pattern) for specified duration."""
@@ -92,10 +81,6 @@ class TensorLink:
             raise ValueError(f"Tensor must be 2D, got shape {tensor.shape}")
         
         rows, cols = tensor.shape
-        tiles_rows, tiles_cols = self._calculate_num_tiles(rows, cols)
-        
-        # Store original dtype to preserve it
-        self._last_sent_dtype = tensor.dtype
         
         # Convert to numpy and handle dtype
         # For bfloat16, we preserve raw bits by viewing as uint16, then as float16
@@ -107,22 +92,14 @@ class TensorLink:
             # Convert to float16 normally
             tensor_np = tensor.detach().cpu().numpy().astype(np.float16)
         
-        # Pad to multiple of tile_size
-        padded_rows = tiles_rows * self.tile_size
-        padded_cols = tiles_cols * self.tile_size
+        # Create codec for this tensor's size
+        c = codec(rows=rows, cols=cols, min_val=0, max_val=1)
         
-        if rows < padded_rows or cols < padded_cols:
-            padded = np.zeros((padded_rows, padded_cols), dtype=np.float16)
-            padded[:rows, :cols] = tensor_np
-            tensor_np = padded
-        
-        # Calculate total frames
-        total_tiles = tiles_rows * tiles_cols
-        frames_per_tile = self.codec.grids_needed()
-        total_frames = total_tiles * frames_per_tile
+        # Encode entire tensor to binary grids
+        grids = c.encode(tensor_np)
+        total_frames = grids.shape[0]
         
         print(f"Sending {rows}×{cols} tensor:")
-        print(f"  Tiles: {tiles_rows}×{tiles_cols} = {total_tiles} tiles")
         print(f"  Total frames: {total_frames}")
         
         # HANDSHAKE: Send START signal
@@ -130,36 +107,18 @@ class TensorLink:
         self._send_sync_frame(self.START_PATTERN, duration_ms=2000)
         time.sleep(0.3)  # Brief pause after START
         
-        frame_count = 0
-        
-        # Process each tile
-        for tile_row in range(tiles_rows):
-            for tile_col in range(tiles_cols):
-                # Extract tile
-                r_start = tile_row * self.tile_size
-                r_end = r_start + self.tile_size
-                c_start = tile_col * self.tile_size
-                c_end = c_start + self.tile_size
-                
-                tile = tensor_np[r_start:r_end, c_start:c_end]
-                
-                # Encode tile to binary grids
-                grids = self.codec.encode(tile)
-                
-                # Send each grid as a camera frame
-                for i in range(grids.shape[0]):
-                    grid = grids[i].astype(np.int64)
-                    frame = Frame(data=grid)
-                    self.camera.send(frame)
-                    self.camera.update()
-                    
-                    frame_count += 1
-                    
-                    if frame_count < total_frames:
-                        time.sleep(self.frame_delay_ms / 1000.0)
-                    
-                    if frame_count % 10 == 0 or frame_count == total_frames:
-                        print(f"  Sent frame {frame_count}/{total_frames}")
+        # Send each grid as a camera frame
+        for i in range(total_frames):
+            grid = grids[i].astype(np.int64)
+            frame = Frame(data=grid)
+            self.camera.send(frame)
+            self.camera.update()
+            
+            if i < total_frames - 1:
+                time.sleep(self.frame_delay_ms / 1000.0)
+            
+            if (i + 1) % 10 == 0 or i == total_frames - 1:
+                print(f"  Sent frame {i + 1}/{total_frames}")
         
         # HANDSHAKE: Send END signal
         print("Sending END signal...")
@@ -173,21 +132,19 @@ class TensorLink:
         Waits for START signal before beginning reception.
         
         Args:
-            rows: Original number of rows in the tensor
-            cols: Original number of columns in the tensor
+            rows: Number of rows in the tensor
+            cols: Number of columns in the tensor
             dtype: Target dtype (default: torch.bfloat16)
             timeout_sec: How long to wait for START signal (default: 60s)
             
         Returns:
             Tensor of shape (rows, cols) with specified dtype
         """
-        tiles_rows, tiles_cols = self._calculate_num_tiles(rows, cols)
-        total_tiles = tiles_rows * tiles_cols
-        frames_per_tile = self.codec.grids_needed()
-        total_frames = total_tiles * frames_per_tile
+        # Create codec for this tensor's size
+        c = codec(rows=rows, cols=cols, min_val=0, max_val=1)
+        total_frames = c.grids_needed()
         
         print(f"Receiving {rows}×{cols} tensor:")
-        print(f"  Tiles: {tiles_rows}×{tiles_cols} = {total_tiles} tiles")
         print(f"  Total frames: {total_frames}")
         
         # HANDSHAKE: Wait for START signal
@@ -254,46 +211,24 @@ class TensorLink:
             print(f"⚠ Warning: Expected {total_frames} frames, got {len(unique_frames)}")
             print(f"  This might cause decoding errors!")
         
-        # STEP 4: Process frames into tiles
+        # STEP 4: Decode frames into tensor
         print("Decoding frames into tensor...")
-        padded_rows = tiles_rows * self.tile_size
-        padded_cols = tiles_cols * self.tile_size
-        reconstructed = np.zeros((padded_rows, padded_cols), dtype=np.float16)
         
-        frame_idx = 0
-        for tile_row in range(tiles_rows):
-            for tile_col in range(tiles_cols):
-                # Collect frames for this tile
-                received_grids = []
-                for i in range(frames_per_tile):
-                    if frame_idx >= len(unique_frames):
-                        raise ValueError(f"Ran out of frames! Expected {total_frames}, got {len(unique_frames)}")
-                    
-                    frame_data = unique_frames[frame_idx]
-                    
-                    # Threshold to binary: 0-3 → 0, 4-7 → 1
-                    binary_data = (frame_data >= 4).astype(np.int64)
-                    received_grids.append(binary_data)
-                    
-                    frame_idx += 1
-                
-                # Decode tile
-                grids_array = np.array(received_grids)
-                tile = self.codec.decode(grids_array)
-                
-                # Place tile in reconstructed tensor
-                r_start = tile_row * self.tile_size
-                r_end = r_start + self.tile_size
-                c_start = tile_col * self.tile_size
-                c_end = c_start + self.tile_size
-                
-                reconstructed[r_start:r_end, c_start:c_end] = tile
-                
-                if (tile_row * tiles_cols + tile_col + 1) % 5 == 0:
-                    print(f"  Decoded tile {tile_row * tiles_cols + tile_col + 1}/{total_tiles}")
+        # Collect all frames and threshold to binary
+        received_grids = []
+        for i in range(total_frames):
+            if i >= len(unique_frames):
+                raise ValueError(f"Ran out of frames! Expected {total_frames}, got {len(unique_frames)}")
+            
+            frame_data = unique_frames[i]
+            
+            # Threshold to binary: 0-3 → 0, 4-7 → 1
+            binary_data = (frame_data >= 4).astype(np.int64)
+            received_grids.append(binary_data)
         
-        # Crop to original size
-        tensor_np = reconstructed[:rows, :cols]
+        # Decode all grids at once
+        grids_array = np.array(received_grids)
+        tensor_np = c.decode(grids_array)
         
         # Convert to PyTorch tensor with proper dtype
         if dtype == torch.bfloat16:
@@ -328,6 +263,7 @@ if __name__ == "__main__":
     print("TENSOR LINK - Example Usage")
     print("=" * 70)
     
+
     # Create camera
     cam = Camera(test_mode=False)
     
@@ -355,6 +291,7 @@ if __name__ == "__main__":
         elif key == ord('s') or key == ord('S'):
             # Send a random tensor (try different sizes!)
             print("\n" + "=" * 70)
+            torch.manual_seed(5828)
             # Example: send a 32×32 bfloat16 tensor
             test_tensor = torch.randn(32, 32, dtype=torch.bfloat16)
             print(f"Sending test tensor:")
