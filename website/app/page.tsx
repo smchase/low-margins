@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import * as ort from "onnxruntime-web";
 import { fetchMNISTImages, fetchMNISTLabels } from "@/utils/mnist";
 import { getModelUrl, listModelPaths } from "@/utils/firebase";
@@ -13,8 +13,6 @@ type MnistResult = {
   pred: number;
   pixels: Uint8Array;
 };
-
-
 
 function MnistCanvas({ pixels }: { pixels: Uint8Array }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -51,16 +49,15 @@ function MnistCanvas({ pixels }: { pixels: Uint8Array }) {
 export default function MnistPage() {
   const [status, setStatus] = useState("loading images…");
   const [items, setItems] = useState<MnistResult[]>([]);
-  const [currentStep, setCurrentStep] = useState<string>("");
   const [isSimulating, setIsSimulating] = useState(false);
   const imagesRef = useRef<Uint8Array[]>([]);
   const labelsRef = useRef<Uint8Array>(new Uint8Array());
   const indicesRef = useRef<number[]>([]);
-  const processedStepPathsRef = useRef<Set<string>>(new Set());
+  const processedPathsRef = useRef<Set<string>>(new Set());
   const shouldContinueSimulatingRef = useRef<boolean>(false);
 
   // Function to run inference with a specific model
-  const runInferenceWithModel = async (
+  const runInferenceWithModel = useCallback(async (
     modelStoragePath: string,
     images: Uint8Array[],
     labels: Uint8Array,
@@ -113,10 +110,10 @@ export default function MnistPage() {
         return updated;
       });
     }
-  };
+  }, []);
 
   // Function to simulate all steps sequentially
-  const simulateSteps = async () => {
+  const simulateSteps = useCallback(async () => {
     if (isSimulating) return;
 
     setIsSimulating(true);
@@ -130,61 +127,57 @@ export default function MnistPage() {
 
       setStatus("running inference…");
 
-      // Continuous loop: fetch fresh list and process new models
+      // Continuous loop: process files chronologically and check for new ones
       while (shouldContinueSimulatingRef.current) {
-        // Fetch fresh list of model paths from Firebase Storage
-        const allStepPaths = await listModelPaths();
+        // Fetch fresh list of model files from Firebase Storage (sorted by createdAt)
+        const allModelFiles = await listModelPaths();
 
-        // Filter out paths that have already been processed
-        const unprocessedStepPaths = allStepPaths.filter(
-          (path) => !processedStepPathsRef.current.has(path)
+        // Filter out already processed files
+        const unprocessedFiles = allModelFiles.filter(
+          (file) => !processedPathsRef.current.has(file.path)
         );
 
-        if (unprocessedStepPaths.length === 0) {
-          // No new models, wait a bit before checking again
-          setCurrentStep("");
-          await new Promise((resolve) => setTimeout(resolve, 2000));
+        if (unprocessedFiles.length === 0) {
+          // No new files available, wait before checking again
+          setStatus("waiting for new steps…");
+          await new Promise((resolve) => setTimeout(resolve, 5000));
           continue;
         }
 
-        // Process all unprocessed models
-        for (let stepIdx = 0; stepIdx < unprocessedStepPaths.length; stepIdx++) {
+        // Process files one at a time in chronological order
+        for (const file of unprocessedFiles) {
           // Check if we should continue before each iteration
           if (!shouldContinueSimulatingRef.current) break;
 
-          const modelStoragePath = unprocessedStepPaths[stepIdx];
-          const stepName = modelStoragePath.split("/").pop() || `Step ${stepIdx}`;
-          setCurrentStep(stepName);
+          const fileName = file.path.split("/").pop() || file.path;
+          setStatus(`processing ${fileName}…`);
+          console.log(`Running inference with model: ${fileName}`);
 
-          // Run inference with current step model (fetched from Firebase)
+          // Run inference with current model file
           await runInferenceWithModel(
-            modelStoragePath,
+            file.path,
             imagesRef.current,
             labelsRef.current,
             indicesRef.current
           );
 
-          // Mark this path as processed
-          processedStepPathsRef.current.add(modelStoragePath);
+          // Mark this file as processed
+          processedPathsRef.current.add(file.path);
 
-          // Wait 2 seconds before next step (except for the last step)
-          if (stepIdx < unprocessedStepPaths.length - 1) {
-            await new Promise((resolve) => setTimeout(resolve, 5000));
-          }
+          // Small delay before checking for next file
+          await new Promise((resolve) => setTimeout(resolve, 500));
         }
       }
 
-      setCurrentStep("");
       setStatus("done");
     } catch (err) {
       console.error(err);
       setStatus("error");
-      setCurrentStep("");
     } finally {
       shouldContinueSimulatingRef.current = false;
       setIsSimulating(false);
     }
-  };
+  }, [isSimulating, runInferenceWithModel]);
 
   // Load images and labels on mount
   useEffect(() => {
@@ -223,6 +216,22 @@ export default function MnistPage() {
     })();
   }, []);
 
+  // Handle spacebar keypress to start simulation
+  useEffect(() => {
+    const handleKeyPress = (e: KeyboardEvent) => {
+      // Only trigger on spacebar and when not already simulating
+      if (e.code === "Space" && !isSimulating && status !== "loading images…") {
+        e.preventDefault(); // Prevent page scroll
+        simulateSteps();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyPress);
+    return () => {
+      window.removeEventListener("keydown", handleKeyPress);
+    };
+  }, [isSimulating, status, simulateSteps]);
+
   const correctCount = items.filter((i) => i.pred !== -1 && i.label === i.pred).length;
   const itemsWithPredictions = items.filter((i) => i.pred !== -1);
   const accuracy =
@@ -238,16 +247,6 @@ export default function MnistPage() {
             wccl 🎥
           </h1>
         </div>
-        <button
-          onClick={simulateSteps}
-          disabled={isSimulating || status === "loading images…"}
-          className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${isSimulating || status === "loading images…"
-            ? "bg-slate-200 text-slate-500 cursor-not-allowed"
-            : "bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800"
-            }`}
-        >
-          {isSimulating ? "Simulating..." : "Simulate Training Steps"}
-        </button>
       </header>
 
       <div className="flex flex-col items-center justify-center mb-8">
@@ -259,8 +258,8 @@ export default function MnistPage() {
               (accuracy >= 80
                 ? "text-green-600"
                 : accuracy >= 50
-                ? "text-yellow-600"
-                : "text-red-600")
+                  ? "text-yellow-600"
+                  : "text-red-600")
             }
           >
             {accuracy}%

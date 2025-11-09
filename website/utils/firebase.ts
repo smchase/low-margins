@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getStorage, ref, getDownloadURL, listAll } from "firebase/storage";
+import { getStorage, ref, getDownloadURL, listAll, getMetadata } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDPnnj34vq108muNzcsTnvWDAb4Dgia3oU",
@@ -24,31 +24,40 @@ export async function getModelUrl(path: string): Promise<string> {
 }
 
 /**
- * List all model files from Firebase Storage in the models/ directory
- * Filters for files matching mlp_*.onnx pattern and sorts by step number
- * @returns Promise resolving to sorted array of model paths (e.g., ["models/mlp_50.onnx", "models/mlp_100.onnx"])
+ * Model file information with metadata
  */
-export async function listModelPaths(): Promise<string[]> {
+export type ModelFileInfo = {
+  path: string;
+  createdAt: number; // timestamp in milliseconds
+};
+
+/**
+ * List all model files from Firebase Storage in the models/ directory
+ * Filters for files matching mlp_*.onnx pattern and sorts by createdAt timestamp
+ * @returns Promise resolving to sorted array of model file info, chronologically ordered
+ */
+export async function listModelPaths(): Promise<ModelFileInfo[]> {
   const modelsRef = ref(storage, "models");
   const result = await listAll(modelsRef);
 
-  // Filter for mlp_*.onnx files and extract step numbers
-  const modelFiles = result.items
+  // Filter for mlp_*.onnx files and get their metadata
+  const modelFilesPromises = result.items
     .filter((item) => {
       const name = item.name;
       return name.startsWith("mlp_") && name.endsWith(".onnx");
     })
-    .map((item) => {
+    .map(async (item) => {
       const name = item.name;
-      // Extract step number from mlp_{step}.onnx
-      const match = name.match(/^mlp_(\d+)\.onnx$/);
-      if (!match) return null;
-      const step = parseInt(match[1], 10);
-      return { step, path: `models/${name}` };
-    })
-    .filter((item): item is { step: number; path: string } => item !== null)
-    .sort((a, b) => a.step - b.step)
-    .map((item) => item.path);
+      const path = `models/${name}`;
+      const metadata = await getMetadata(item);
+      return {
+        path,
+        createdAt: metadata.timeCreated ? new Date(metadata.timeCreated).getTime() : 0,
+      };
+    });
 
-  return modelFiles;
+  const modelFiles = await Promise.all(modelFilesPromises);
+
+  // Sort by createdAt timestamp (chronologically)
+  return modelFiles.sort((a, b) => a.createdAt - b.createdAt);
 }
