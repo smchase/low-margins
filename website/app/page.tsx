@@ -13,6 +13,24 @@ type MnistResult = {
   pixels: Uint8Array;
 };
 
+// Extract step numbers from model filenames and sort chronologically
+function getStepModelPaths(): string[] {
+  const steps = [
+    { step: 50, path: "/models/steps/model_weights_step_50.onnx" },
+    { step: 100, path: "/models/steps/model_weights_step_100.onnx" },
+    { step: 150, path: "/models/steps/model_weights_step_150.onnx" },
+    { step: 200, path: "/models/steps/model_weights_step_200.onnx" },
+    { step: 250, path: "/models/steps/model_weights_step_250.onnx" },
+    { step: 300, path: "/models/steps/model_weights_step_300.onnx" },
+    { step: 350, path: "/models/steps/model_weights_step_350.onnx" },
+    { step: 400, path: "/models/steps/model_weights_step_400.onnx" },
+    { step: 450, path: "/models/steps/model_weights_step_450.onnx" },
+    { step: 500, path: "/models/steps/model_weights.onnx" },
+  ];
+
+  return steps.sort((a, b) => a.step - b.step).map(s => s.path);
+}
+
 
 function MnistCanvas({ pixels }: { pixels: Uint8Array }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -49,11 +67,114 @@ function MnistCanvas({ pixels }: { pixels: Uint8Array }) {
 export default function MnistPage() {
   const [status, setStatus] = useState("loading images…");
   const [items, setItems] = useState<MnistResult[]>([]);
+  const [currentStep, setCurrentStep] = useState<string>("");
+  const [isSimulating, setIsSimulating] = useState(false);
+  const imagesRef = useRef<Uint8Array[]>([]);
+  const labelsRef = useRef<Uint8Array>(new Uint8Array());
+  const indicesRef = useRef<number[]>([]);
 
+  // Function to run inference with a specific model
+  const runInferenceWithModel = async (
+    modelPath: string,
+    images: Uint8Array[],
+    labels: Uint8Array,
+    indices: number[]
+  ) => {
+    const session = await ort.InferenceSession.create(modelPath, {
+      executionProviders: hasWebGPU ? ["webgpu", "wasm"] : ["wasm"],
+    });
+
+    const inputName = session.inputNames[0];
+    const outputName = session.outputNames[0];
+
+    // Run inference on all items
+    for (let i = 0; i < indices.length; i++) {
+      const idx = indices[i];
+      const pixels = images[idx];
+      const label = labels[idx];
+
+      const data = new Float32Array(1 * 1 * 28 * 28);
+      for (let j = 0; j < pixels.length; j++) {
+        data[j] = pixels[j] / 255.0;
+      }
+
+      const tensor = new ort.Tensor("float32", data, [1, 1, 28, 28]);
+      const out = await session.run({ [inputName]: tensor });
+      const logits = out[outputName].data as Float32Array;
+
+      // argmax
+      let bestIdx = 0;
+      let bestVal = logits[0];
+      for (let j = 1; j < logits.length; j++) {
+        if (logits[j] > bestVal) {
+          bestVal = logits[j];
+          bestIdx = j;
+        }
+      }
+
+      // Update this specific item with its prediction
+      setItems((prev) => {
+        const updated = [...prev];
+        updated[i] = {
+          id: idx,
+          label,
+          pred: bestIdx,
+          pixels,
+        };
+        return updated;
+      });
+    }
+  };
+
+  // Function to simulate all steps sequentially
+  const simulateSteps = async () => {
+    if (isSimulating) return;
+
+    setIsSimulating(true);
+    const stepPaths = getStepModelPaths();
+
+    try {
+      // Reset predictions to -1 before starting
+      setItems((prev) =>
+        prev.map((item) => ({ ...item, pred: -1 }))
+      );
+
+      setStatus("running inference…");
+
+      for (let stepIdx = 0; stepIdx < stepPaths.length; stepIdx++) {
+        const modelPath = stepPaths[stepIdx];
+        const stepName = modelPath.split("/").pop() || `Step ${stepIdx}`;
+        setCurrentStep(stepName);
+
+        // Run inference with current step model
+        await runInferenceWithModel(
+          modelPath,
+          imagesRef.current,
+          labelsRef.current,
+          indicesRef.current
+        );
+
+        // Wait 5 seconds before next step (except for the last step)
+        if (stepIdx < stepPaths.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+      }
+
+      setCurrentStep("");
+      setStatus("done");
+    } catch (err) {
+      console.error(err);
+      setStatus("error");
+      setCurrentStep("");
+    } finally {
+      setIsSimulating(false);
+    }
+  };
+
+  // Load images and labels on mount
   useEffect(() => {
     (async () => {
       try {
-        // Load images and labels first
         setStatus("loading images…");
         const [{ images, numImages }, { labels }] = await Promise.all([
           fetchMNISTImages("/mnist/t10k-images.idx3-ubyte"),
@@ -65,6 +186,11 @@ export default function MnistPage() {
           Math.floor(Math.random() * numImages)
         );
 
+        // Store references for reuse
+        imagesRef.current = images;
+        labelsRef.current = labels;
+        indicesRef.current = indices;
+
         // Create initial items with just images and labels (no predictions yet)
         const initialItems: MnistResult[] = indices.map((idx) => ({
           id: idx,
@@ -74,57 +200,7 @@ export default function MnistPage() {
         }));
 
         setItems(initialItems);
-        setStatus("loading model…");
-
-        // Now load the model
-        const session = await ort.InferenceSession.create("/models/mlp.onnx", {
-          executionProviders: hasWebGPU ? ["webgpu", "wasm"] : ["wasm"],
-        });
-
-        const inputName = session.inputNames[0];
-        const outputName = session.outputNames[0];
-
-        setStatus("running inference…");
-
-        // Run inference incrementally, updating UI after each prediction
-        for (let i = 0; i < indices.length; i++) {
-          const idx = indices[i];
-          const pixels = images[idx];
-          const label = labels[idx];
-
-          const data = new Float32Array(1 * 1 * 28 * 28);
-          for (let j = 0; j < pixels.length; j++) {
-            data[j] = pixels[j] / 255.0;
-          }
-
-          const tensor = new ort.Tensor("float32", data, [1, 1, 28, 28]);
-          const out = await session.run({ [inputName]: tensor });
-          const logits = out[outputName].data as Float32Array;
-
-          // argmax
-          let bestIdx = 0;
-          let bestVal = logits[0];
-          for (let j = 1; j < logits.length; j++) {
-            if (logits[j] > bestVal) {
-              bestVal = logits[j];
-              bestIdx = j;
-            }
-          }
-
-          // Update this specific item with its prediction
-          setItems((prev) => {
-            const updated = [...prev];
-            updated[i] = {
-              id: idx,
-              label,
-              pred: bestIdx,
-              pixels,
-            };
-            return updated;
-          });
-        }
-
-        setStatus("done");
+        setStatus("ready");
       } catch (err) {
         console.error(err);
         setStatus("error");
@@ -149,17 +225,25 @@ export default function MnistPage() {
           <p className="text-sm text-slate-600">
             {status === "done"
               ? `Ran ${items.length} samples from t10k.`
-              : "Loading model & dataset…"}
+              : status === "ready"
+                ? `Loaded ${items.length} samples. Click "Simulate Training Steps" to start.`
+                : status === "running inference…"
+                  ? currentStep
+                    ? `Running inference with ${currentStep}...`
+                    : "Running inference…"
+                  : "Loading model & dataset…"}
           </p>
         </div>
-        {/* <div
-          className={`rounded-lg px-4 py-2 text-sm font-medium ${status === "done"
-            ? "bg-slate-100 ring-1 ring-slate-300 text-slate-900"
-            : "bg-yellow-100 text-yellow-900 ring-1 ring-yellow-300"
+        <button
+          onClick={simulateSteps}
+          disabled={isSimulating || status === "loading images…"}
+          className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${isSimulating || status === "loading images…"
+            ? "bg-slate-200 text-slate-500 cursor-not-allowed"
+            : "bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800"
             }`}
         >
-          Status: <span className="font-bold capitalize">{status}</span>
-        </div> */}
+          {isSimulating ? "Simulating..." : "Simulate Training Steps"}
+        </button>
       </header>
 
       <div className="flex items-center gap-3">
