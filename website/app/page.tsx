@@ -47,40 +47,54 @@ function MnistCanvas({ pixels }: { pixels: Uint8Array }) {
 }
 
 export default function MnistPage() {
-  const [status, setStatus] = useState("loading…");
+  const [status, setStatus] = useState("loading images…");
   const [items, setItems] = useState<MnistResult[]>([]);
 
   useEffect(() => {
     (async () => {
       try {
-        const session = await ort.InferenceSession.create("/models/mlp.onnx", {
-          executionProviders: hasWebGPU ? ["webgpu", "wasm"] : ["wasm"],
-        });
-
-        const { images, numImages } = await fetchMNISTImages(
-          "/mnist/t10k-images.idx3-ubyte"
-        );
-        const { labels } = await fetchMNISTLabels(
-          "/mnist/t10k-labels.idx1-ubyte"
-        );
-
-        const inputName = session.inputNames[0];
-        const outputName = session.outputNames[0];
+        // Load images and labels first
+        setStatus("loading images…");
+        const [{ images, numImages }, { labels }] = await Promise.all([
+          fetchMNISTImages("/mnist/t10k-images.idx3-ubyte"),
+          fetchMNISTLabels("/mnist/t10k-labels.idx1-ubyte"),
+        ]);
 
         const count = Math.min(300, numImages);
         const indices = Array.from({ length: count }, () =>
           Math.floor(Math.random() * numImages)
         );
 
-        const results: MnistResult[] = [];
+        // Create initial items with just images and labels (no predictions yet)
+        const initialItems: MnistResult[] = indices.map((idx) => ({
+          id: idx,
+          label: labels[idx],
+          pred: -1, // -1 indicates prediction not ready yet
+          pixels: images[idx],
+        }));
 
-        for (const idx of indices) {
+        setItems(initialItems);
+        setStatus("loading model…");
+
+        // Now load the model
+        const session = await ort.InferenceSession.create("/models/mlp.onnx", {
+          executionProviders: hasWebGPU ? ["webgpu", "wasm"] : ["wasm"],
+        });
+
+        const inputName = session.inputNames[0];
+        const outputName = session.outputNames[0];
+
+        setStatus("running inference…");
+
+        // Run inference incrementally, updating UI after each prediction
+        for (let i = 0; i < indices.length; i++) {
+          const idx = indices[i];
           const pixels = images[idx];
           const label = labels[idx];
 
           const data = new Float32Array(1 * 1 * 28 * 28);
-          for (let i = 0; i < pixels.length; i++) {
-            data[i] = pixels[i] / 255.0;
+          for (let j = 0; j < pixels.length; j++) {
+            data[j] = pixels[j] / 255.0;
           }
 
           const tensor = new ort.Tensor("float32", data, [1, 1, 28, 28]);
@@ -90,22 +104,26 @@ export default function MnistPage() {
           // argmax
           let bestIdx = 0;
           let bestVal = logits[0];
-          for (let i = 1; i < logits.length; i++) {
-            if (logits[i] > bestVal) {
-              bestVal = logits[i];
-              bestIdx = i;
+          for (let j = 1; j < logits.length; j++) {
+            if (logits[j] > bestVal) {
+              bestVal = logits[j];
+              bestIdx = j;
             }
           }
 
-          results.push({
-            id: idx,
-            label,
-            pred: bestIdx,
-            pixels,
+          // Update this specific item with its prediction
+          setItems((prev) => {
+            const updated = [...prev];
+            updated[i] = {
+              id: idx,
+              label,
+              pred: bestIdx,
+              pixels,
+            };
+            return updated;
           });
         }
 
-        setItems(results);
         setStatus("done");
       } catch (err) {
         console.error(err);
@@ -114,9 +132,12 @@ export default function MnistPage() {
     })();
   }, []);
 
-  const correctCount = items.filter((i) => i.label === i.pred).length;
+  const correctCount = items.filter((i) => i.pred !== -1 && i.label === i.pred).length;
+  const itemsWithPredictions = items.filter((i) => i.pred !== -1);
   const accuracy =
-    items.length > 0 ? Math.round((correctCount / items.length) * 100) : 0;
+    itemsWithPredictions.length > 0
+      ? Math.round((correctCount / itemsWithPredictions.length) * 100)
+      : 0;
 
   return (
     <div className="mx-auto flex flex-col gap-6 px-6 py-10">
@@ -157,20 +178,23 @@ export default function MnistPage() {
           </span>
         </div>
         <p className="text-xs text-slate-600">
-          {correctCount}/{items.length} correct
+          {correctCount}/{itemsWithPredictions.length || items.length} correct
         </p>
       </div>
 
       {/* grid of images */}
       <div className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))]">
         {items.map((item, idx) => {
-          const correct = item.label === item.pred;
+          const hasPrediction = item.pred !== -1;
+          const correct = hasPrediction && item.label === item.pred;
           return (
             <div
               key={item.id + "-" + idx}
-              className={`m-px aspect-square w-20 h-20 border-8 ${correct
-                ? "border-green-500"
-                : "border-red-500"
+              className={`m-px aspect-square w-20 h-20 border-8 ${!hasPrediction
+                ? "border-slate-300"
+                : correct
+                  ? "border-green-500"
+                  : "border-red-500"
                 }`}
             >
               <MnistCanvas pixels={item.pixels} />
