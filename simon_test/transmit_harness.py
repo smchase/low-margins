@@ -30,19 +30,12 @@ if __name__ == "__main__":
     print("Press SPACE to start transmission (will wait for odd second)")
     print("="*60)
     
-    # Wait for user to press space
-    started = False
-    while not started:
+    while True:
         cam.update()
         key = cv2.waitKey(30) & 0xFF
         if key == ord(' '):
-            started = True
-            print("Starting... waiting for next odd second")
-        elif key == ord('q') or key == ord('Q'):
-            print("Exiting...")
-            exit(0)
+            break
     
-    # Wait for the next odd second
     while int(time.time()) % 2 == 0:
         cam.update()
         cv2.waitKey(30)
@@ -66,20 +59,8 @@ if __name__ == "__main__":
             print(f"[ODD {current_second}] Transmitted test case {current_test_idx}")
             current_test_idx += 1
             last_second = current_second
-        
-        key = cv2.waitKey(30) & 0xFF
-        if key == ord('q') or key == ord('Q'):
-            print("\nExiting...")
-            break
     
     if current_test_idx >= len(test_cases):
         print(f"\n✓ All {len(test_cases)} test cases transmitted!")
-        print("Keep window open until receiver confirms all cases received...")
-        
-        # Keep transmitting the last frame
-        while True:
-            cam.update()
-            key = cv2.waitKey(30) & 0xFF
-            if key == ord('q') or key == ord('Q'):
-                break
+        print("Keep window open until receiver confirms all cases received...") 
 

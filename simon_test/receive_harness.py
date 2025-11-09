@@ -30,27 +30,13 @@ if __name__ == "__main__":
     print("Press SPACE to start reception (will wait for even second)")
     print("="*60)
     
-    # Wait for user to press space
-    started = False
-    while not started:
+    while True:
         cam.update()
         key = cv2.waitKey(30) & 0xFF
         if key == ord(' '):
-            started = True
-            print("Starting... waiting for sync with transmitter")
-        elif key == ord('q') or key == ord('Q'):
-            print("Exiting...")
-            exit(0)
+            break
     
-    # Wait for the next ODD second (same as transmitter)
     while int(time.time()) % 2 == 0:
-        cam.update()
-        cv2.waitKey(30)
-    
-    print("On odd second boundary... waiting 1 more second for even")
-    
-    # Now wait for the next EVEN second (transmitter will have just sent on the odd second)
-    while int(time.time()) % 2 == 1:
         cam.update()
         cv2.waitKey(30)
     
@@ -96,11 +82,6 @@ if __name__ == "__main__":
             
             current_test_idx += 1
             last_second = current_second
-        
-        key = cv2.waitKey(30) & 0xFF
-        if key == ord('q') or key == ord('Q'):
-            print("\nExiting early...")
-            break
     
     # Final report
     print("\n" + "="*60)
@@ -121,11 +102,3 @@ if __name__ == "__main__":
     for result in results:
         status = "✓" if result['matches'] else "✗"
         print(f"  {status} Test {result['test_idx']}: {result['pixels_wrong']} pixels wrong")
-    
-    print("\nPress Q to exit...")
-    while True:
-        cam.update()
-        key = cv2.waitKey(30) & 0xFF
-        if key == ord('q') or key == ord('Q'):
-            break
-
