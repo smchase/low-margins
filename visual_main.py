@@ -561,12 +561,27 @@ class CodecTransmitterDisplay:
                             print(f"[TX] Avg per tensor: {elapsed/self.stream_count:.2f} seconds")
                         return
                     else:
-                        # Start next iteration
-                        self.current_grid_idx = 0
+                        # Start next iteration - loop back to beginning
                         import time as _time
                         elapsed = _time.time() - self.transmission_start_time
-                        print(f"\n[TX STREAM] Iteration {self.current_stream_iteration}/{self.stream_count} complete!")
-                        print(f"[TX STREAM] Elapsed so far: {elapsed:.2f}s, starting next tensor...")
+                        tensor_bytes = self.rows * self.cols * 2
+                        total_so_far = tensor_bytes * self.current_stream_iteration
+                        throughput_so_far = (total_so_far / 1024) / elapsed if elapsed > 0 else 0
+                        
+                        print(f"\n[TX STREAM] ═══ Tensor {self.current_stream_iteration}/{self.stream_count} complete! ═══")
+                        print(f"[TX STREAM] Sent so far: {total_so_far} bytes ({total_so_far/1024:.2f} KB) in {elapsed:.2f}s")
+                        print(f"[TX STREAM] Throughput: {throughput_so_far:.2f} KB/s")
+                        print(f"[TX STREAM] Starting tensor {self.current_stream_iteration+1}/{self.stream_count}...")
+                        
+                        # Reset to start of transmission sequence
+                        self.current_grid_idx = 0
+                        self.current_row_slice = 0
+                        self.current_col_slice = 0
+                        
+                        # Add a brief pause between iterations for synchronization (2 frame intervals)
+                        # This helps RX distinguish between tensors
+                        self.remaining_start_frames = max(2, int(self.fps * 0.5))  # 0.5 second pause
+                        print(f"[TX STREAM] Pausing for {self.remaining_start_frames} frames between tensors...")
 
     def _current_slice_values(self):
         full_grid = self.encoded_grids[self.current_grid_idx]
@@ -583,6 +598,14 @@ class CodecTransmitterDisplay:
     def render(self):
         total_size = self.grid_size * self.cell_size
         grid = np.zeros((total_size, total_size, 3), dtype=np.uint8)
+        
+        # Debug: add status text overlay for stream mode
+        status_text = ""
+        if self.stream_count > 1 and self.transmitting:
+            frame_in_iteration = (self.current_grid_idx * self.num_row_slices * self.num_col_slices +
+                                 self.current_row_slice * self.num_col_slices + 
+                                 self.current_col_slice + 1)
+            status_text = f"Tensor {self.current_stream_iteration+1}/{self.stream_count} | Frame {frame_in_iteration}/{self.frames_per_iteration}"
 
         if not self.transmitting:
             self.flash_counter += 1
@@ -640,6 +663,11 @@ class CodecTransmitterDisplay:
         image[-border-frame_width:-border, border:-border] = [0, 0, 0]
         image[border:-border, border:border+frame_width] = [0, 0, 0]
         image[border:-border, -border-frame_width:-border] = [0, 0, 0]
+        
+        # Add status text for stream mode
+        if status_text:
+            cv2.putText(image, status_text, (10, final_size - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         return image
 
@@ -1198,6 +1226,17 @@ def run_rx(args):
                         continue
                     waiting_for_first_data_frame = False
                     print("\n[RX] Start signal complete - capturing data frames.")
+                
+                # In stream mode, detect inter-tensor pause (start signal between tensors)
+                if stream_mode and tensors_received > 0 and tensors_received < stream_count:
+                    if is_start_signal(pattern):
+                        print(f"[RX STREAM] Detected inter-tensor pause (start signal) - ignoring...")
+                        # Reset pending to avoid capturing pause frames
+                        pending_pattern = None
+                        pending_phase = None
+                        pending_consistency = 0
+                        phase_seen_time = None
+                        continue
                 if len(captured_frames) == 0:
                     if is_calibration_pattern(pattern):
                         continue
@@ -1277,12 +1316,17 @@ def run_rx(args):
                     
                     # Don't enforce strict phase alternation - just track what we captured
 
-                    # Check if we have enough frames for one tensor
+                    # Check if we have enough frames for the next tensor
                     frames_for_current_tensor = len(captured_frames) - (tensors_received * frames_per_tensor)
                     
-                    if frames_for_current_tensor >= frames_per_tensor:
-                        if stream_start_time is None:
-                            stream_start_time = time.time()
+                    # Start timer on first frame capture
+                    if stream_start_time is None and stream_mode and total_captured == 1:
+                        stream_start_time = time.time()
+                    
+                    # Only decode if we haven't already processed these frames
+                    should_decode = frames_for_current_tensor >= frames_per_tensor and tensors_received < stream_count
+                    
+                    if should_decode:
                         
                         # Extract frames for this tensor only
                         start_idx = tensors_received * frames_per_tensor
@@ -1460,9 +1504,9 @@ def run_rx(args):
                                     phase_seen_time = None
                                     continue
                         except Exception as err:
-                            print(f"[RX] ✗ Decode failed: {err}")
-                        
-                        if not stream_mode or tensors_received >= stream_count:
+                            print(f"[RX] ✗ Decode failed for tensor {tensors_received+1}: {err}")
+                            
+                            # Always stop on decode error
                             capture_active = False
                             phase_seen_time = None
                             waiting_for_start_signal = False
@@ -1470,6 +1514,13 @@ def run_rx(args):
                             start_signal_detected = False
                             start_signal_wait_start = 0.0
                             start_signal_wait_logged = False
+                            
+                            if stream_mode:
+                                print(f"[RX STREAM] ⚠️  Stream aborted due to decode error")
+                                print(f"[RX STREAM] Successfully received {tensors_received}/{stream_count} tensors before error")
+                            
+                            # Don't continue the loop after error
+                            break
             else:
                 capture_active = False
                 last_pattern = None
