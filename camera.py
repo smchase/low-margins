@@ -304,14 +304,26 @@ class Camera:
         # Create wider image for 2:1 aspect ratio
         img = np.ones((self.display_height, self.display_width, 3), dtype=np.uint8) * 255
         marker_size = int(self.display_height * 0.15)  # 15% of height
-        padding = int(self.display_height * 0.1)  # 10% padding
+
+        # Data area boundaries (same as color pattern and data rendering)
+        data_start_y = int(self.display_height * 0.1)
+        data_start_x = int(self.display_width * 0.1)
+        data_height = int(self.display_height * 0.8)
+        data_width = int(self.display_width * 0.8)
+
         aruco_dict = cv2.aruco.getPredefinedDictionary(
             cv2.aruco.DICT_4X4_50)
+
+        # Position markers so their detected corners align with data area corners
+        # Marker 0: top-left corner at data top-left
+        # Marker 1: top-right corner at data top-right
+        # Marker 2: bottom-right corner at data bottom-right
+        # Marker 3: bottom-left corner at data bottom-left
         positions = [
-            (padding, padding),
-            (self.display_width - marker_size - padding, padding),
-            (self.display_width - marker_size - padding, self.display_height - marker_size - padding),
-            (padding, self.display_height - marker_size - padding),
+            (data_start_x, data_start_y),  # marker 0 top-left
+            (data_start_x + data_width - marker_size, data_start_y),  # marker 1 top-left
+            (data_start_x + data_width - marker_size, data_start_y + data_height - marker_size),  # marker 2 top-left
+            (data_start_x, data_start_y + data_height - marker_size),  # marker 3 top-left
         ]
 
         for marker_id, (x, y) in enumerate(positions):
