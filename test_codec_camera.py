@@ -1,3 +1,20 @@
+"""
+Test for codec + camera integration.
+
+Workflow:
+1. Both computers: Complete calibration (T to transmit, R to receive)
+2. Sender: Press S for send mode
+   - Shows GREEN start signal for 5 seconds
+   - Then cycles through encoded grids at 2fps
+3. Receiver: Press R for receive mode, then SPACE to start
+   - Waits for GREEN start signal
+   - Detects when start signal changes
+   - Collects all grids automatically
+   - Decodes and compares with expected tensor
+   - Shows diff report (perfect match or error details)
+
+Note: Both TX and RX use the same hardcoded tensor (seed=42) for verification.
+"""
 import numpy as np
 import cv2
 import time
@@ -163,6 +180,7 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
 
     # State machine: idle -> waiting_for_start -> collecting -> done
     state = "idle"
+    last_debug_print = 0
 
     while True:
         # Capture current frame
@@ -179,8 +197,11 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
             is_start_signal = np.all(current_data == 3)
 
             if is_start_signal:
-                # Still in start signal
-                print("[WAITING] Green start signal detected, waiting for it to change...")
+                # Still in start signal - print every 30 frames (~1 second)
+                current_time = time.time()
+                if current_time - last_debug_print > 1.0:
+                    print("[WAITING] Green start signal detected, waiting for it to change...")
+                    last_debug_print = current_time
                 prev_frame_data = current_data.copy()
             else:
                 # Start signal changed! Begin collecting
