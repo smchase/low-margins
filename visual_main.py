@@ -718,13 +718,29 @@ def load_tensor(args):
             tensor = tensor.astype(np.float16)
         return tensor
 
-    if hasattr(args, 'color_test_pattern') and args.color_test_pattern:
+    if args.color_test_pattern:
         # Create a simple color test pattern
         tensor = create_color_test_pattern_tensor(args.rows, args.cols)
         print(f"[TX] Using color test pattern for roundtrip verification")
         print(f"[TX] Colors used: {', '.join(COLOR_NAMES)} (values 0-{CODEC_MAX_VAL})")
+        print(f"[TX] Tensor shape: {tensor.shape}")
+        print(f"[TX] Visual grid size: {args.grid_size}×{args.grid_size}")
+        if args.rows != args.grid_size or args.cols != args.grid_size:
+            print(f"[TX] ⚠️  WARNING: Tensor size ({args.rows}×{args.cols}) != grid size ({args.grid_size}×{args.grid_size})")
+            print(f"[TX] ⚠️  Tensor will only fill {args.rows/args.grid_size*100:.0f}% of display width, {args.cols/args.grid_size*100:.0f}% of height")
+            print(f"[TX] ⚠️  For full-screen display, use --grid-size {args.rows} (or change --rows/--cols to {args.grid_size})")
         print(f"[TX] First row: {tensor[0, :min(10, args.cols)]}")
+        print(f"[TX] Value range: [{tensor.min():.3f}, {tensor.max():.3f}]")
         print(f"[TX] Pattern will exercise all 5 colors during transmission")
+        
+        # Test the codec roundtrip locally to verify it works
+        from codec import codec
+        test_codec = codec(args.rows, args.cols, CODEC_MIN_VAL, CODEC_MAX_VAL)
+        test_grids = test_codec.encode(tensor)
+        test_decoded = test_codec.decode(test_grids)
+        matches = np.sum(tensor.view(np.uint16) == test_decoded.view(np.uint16))
+        print(f"[TX] Local codec test: {matches}/{tensor.size} cells roundtrip correctly ({matches/tensor.size*100:.1f}%)")
+        
         return tensor
 
     if args.test_pattern:
@@ -932,8 +948,11 @@ def run_rx(args):
     expected_frames = None
     if args.debug_frame_compare:
         reference_tensor = None
-        if hasattr(args, 'verify_color_test_pattern') and args.verify_color_test_pattern:
+        if args.color_test_pattern:
             reference_tensor = create_color_test_pattern_tensor(args.rows, args.cols)
+            print(f"[RX] Using color test pattern as reference for frame comparison")
+            print(f"[RX] Reference first row: {reference_tensor[0, :min(10, args.cols)]}")
+            print(f"[RX] Reference value range: [{reference_tensor.min():.3f}, {reference_tensor.max():.3f}]")
         elif args.verify_test_pattern:
             reference_tensor = create_test_pattern_tensor(args.rows, args.cols)
         elif args.tensor:
@@ -957,6 +976,10 @@ def run_rx(args):
     print("RX MODE - CODEC VISUAL LINK (5-Color System)")
     print("=" * 70)
     print(f"Colors: {', '.join(COLOR_NAMES)} (values 0-{CODEC_MAX_VAL})")
+    print(f"Tensor size: {args.rows}×{args.cols}, Visual grid: {args.grid_size}×{args.grid_size}")
+    if args.rows != args.grid_size or args.cols != args.grid_size:
+        print(f"⚠️  WARNING: Tensor size != grid size. TX must use same --grid-size!")
+        print(f"   Suggestion: Add --grid-size {args.rows} to BOTH tx and rx commands")
     print(f"Expecting {total_frames_needed} frames "
           f"({codec_obj.grids_needed()} grids × {layout[2]} row slices × {layout[3]} col slices)")
     print("Controls:")
@@ -1166,7 +1189,7 @@ def run_rx(args):
                                       f"max={valid_values.max():.3f}, mean={valid_values.mean():.3f}")
                             
                             # If test pattern mode, verify known values
-                            if hasattr(args, 'verify_color_test_pattern') and args.verify_color_test_pattern:
+                            if args.color_test_pattern:
                                 verify_color_test_pattern(decoded_tensor, args.rows, args.cols)
                             elif args.verify_test_pattern:
                                 print("\n[RX] Verifying test pattern values...")
@@ -1350,7 +1373,8 @@ def run_rx(args):
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Codec Visual Data Link")
     parser.add_argument('--mode', required=True, choices=['tx', 'rx'], help='Run as transmitter or receiver')
-    parser.add_argument('--grid-size', type=int, default=VISUAL_GRID_SIZE, help='Visual grid resolution')
+    parser.add_argument('--grid-size', type=int, default=VISUAL_GRID_SIZE, 
+                        help='Visual grid resolution (should match --rows/--cols for full display)')
     parser.add_argument('--fps', type=float, default=TRANSMISSION_FPS, help='TX frames per second')
     parser.add_argument('--start-signal-seconds', type=float, default=1.0,
                         help='Duration to show solid green start signal before frames')
@@ -1359,7 +1383,7 @@ def build_arg_parser():
     parser.add_argument('--tensor', type=str, help='Path to .npy tensor for TX mode')
     parser.add_argument('--seed', type=int, default=42, help='Seed for random tensor (TX)')
     parser.add_argument('--test-pattern', action='store_true', help='Use test pattern tensor instead of random (TX)')
-    parser.add_argument('--color-test-pattern', action='store_true', help='Use simple color test pattern (cycles 0-4) for TX mode')
+    parser.add_argument('--color-test-pattern', action='store_true', help='Use simple color test pattern for TX/RX (transmission and verification)')
     parser.add_argument('--camera-index', type=int, default=0, help='Camera index for RX mode')
     parser.add_argument('--brightness-adjust', type=int, default=0,
                         help='Brightness adjustment for color sampling, -100 to +100 (RX mode)')
@@ -1379,9 +1403,7 @@ def build_arg_parser():
     parser.add_argument('--capture-interval', type=float, default=0.3,
                         help='Minimum seconds between frame captures (RX)')
     parser.add_argument('--verify-test-pattern', action='store_true',
-                        help='Verify decoded tensor against test pattern (RX)')
-    parser.add_argument('--verify-color-test-pattern', action='store_true',
-                        help='Verify decoded tensor against color test pattern (RX)')
+                        help='Verify decoded tensor against test pattern (RX, deprecated - use --test-pattern instead)')
     parser.add_argument('--flip-horizontal', action='store_true',
                         help='Enable horizontal flip for facing cameras (RX)')
     parser.add_argument('--skip-start-signal', action='store_true',
