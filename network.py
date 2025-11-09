@@ -231,39 +231,57 @@ if __name__ == "__main__":
     
     if mode == "root":
         # Test as root
-        comm = NetworkCommunicator(is_root=True)
-        comm.setup(num_workers=1)
-        
-        print("\nRoot: Waiting for gradients...")
-        gradients = comm.receive_gradients()
-        print(f"Root: Received {len(gradients)} gradient sets")
-        print(f"Root: First gradient set has {len(gradients[0])} tensors")
-        
-        print("\nRoot: Sending test parameters...")
-        test_params = [torch.randn(10, 10) for _ in range(3)]
-        comm.send_parameters(test_params)
-        print("Root: Parameters sent!")
-        
-        comm.close()
+        try:
+            comm = NetworkCommunicator(is_root=True)
+            comm.setup(num_workers=1)
+            
+            print("\nRoot: Waiting for gradients...")
+            gradients = comm.receive_gradients()
+            print(f"Root: Received {len(gradients)} gradient sets")
+            print(f"Root: First gradient set has {len(gradients[0])} tensors")
+            
+            print("\nRoot: Sending test parameters...")
+            test_params = [torch.randn(10, 10) for _ in range(3)]
+            comm.send_parameters(test_params)
+            print("Root: Parameters sent!")
+            
+            print("\nRoot: Test complete! Closing connections...")
+            comm.close()
+            print("Root: Done!")
+        except Exception as e:
+            print(f"Root: ERROR - {e}")
+            import traceback
+            traceback.print_exc()
+            if 'comm' in locals():
+                comm.close()
         
     elif mode == "worker":
         root_host = sys.argv[2] if len(sys.argv) > 2 else 'localhost'
         
         # Test as worker
-        comm = NetworkCommunicator(is_root=False, root_host=root_host)
-        comm.setup()
-        
-        print("\nWorker: Sending test gradients...")
-        test_grads = [torch.randn(10, 10) for _ in range(3)]
-        comm.send_gradients(test_grads)
-        print("Worker: Gradients sent!")
-        
-        print("\nWorker: Waiting for parameters...")
-        params = comm.receive_parameters()
-        print(f"Worker: Received {len(params)} parameters")
-        print(f"Worker: First parameter shape: {params[0].shape}")
-        
-        comm.close()
+        try:
+            comm = NetworkCommunicator(is_root=False, root_host=root_host)
+            comm.setup()
+            
+            print("\nWorker: Sending test gradients...")
+            test_grads = [torch.randn(10, 10) for _ in range(3)]
+            comm.send_gradients(test_grads)
+            print("Worker: Gradients sent!")
+            
+            print("\nWorker: Waiting for parameters...")
+            params = comm.receive_parameters()
+            print(f"Worker: Received {len(params)} parameters")
+            print(f"Worker: First parameter shape: {params[0].shape}")
+            
+            print("\nWorker: Test complete! Closing connections...")
+            comm.close()
+            print("Worker: Done!")
+        except Exception as e:
+            print(f"Worker: ERROR - {e}")
+            import traceback
+            traceback.print_exc()
+            if 'comm' in locals():
+                comm.close()
     
     else:
         print(f"Unknown mode: {mode}")
