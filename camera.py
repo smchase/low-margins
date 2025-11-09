@@ -39,7 +39,7 @@ class Camera:
         self.transmit_calibration_done = False
 
         # Current display mode
-        self.display_mode = "idle"  # idle, transmit_markers, transmit_colors, send_data
+        self.display_mode = "instructions"  # instructions, transmit_markers, transmit_colors, receive_camera, send_data
         self.display_data: Optional[Frame] = None
 
         if not test_mode:
@@ -54,11 +54,11 @@ class Camera:
                 f"{int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
             )
 
-        # Print instructions
-        self._print_instructions()
-
         # Create unified window
         cv2.namedWindow('Camera Data Link')
+
+        # Print instructions
+        self._print_instructions()
 
     def _print_instructions(self) -> None:
         print("\n" + "="*70)
@@ -76,7 +76,7 @@ class Camera:
         print("  3. Computer B: Press T (transmit calibration)")
         print("  4. Computer A: Press R (receive B's calibration)")
         print("  5. Both computers have ✓✓ checkmarks")
-        print("  6. Use S to send data, D to decode data")
+        print("  6. Use S to send data, R to receive data")
         print("\nNOTE: You can press R before the other side presses T.")
         print("      It will wait until it sees the calibration pattern.")
         print("="*70 + "\n")
@@ -151,7 +151,7 @@ class Camera:
                 return self._render_color_calibration_pattern(self._transmit_color_idx)
             return self._render_instructions()
         elif self.display_mode == "receive_camera":
-            # Show camera feed - already 1000x1000
+            # Show camera feed
             return webcam_frame
         elif self.display_mode == "send_data":
             if self.display_data is not None:
@@ -307,46 +307,6 @@ class Camera:
 
         return img
 
-    def _render_receiver_display(
-            self, frame: NDArray[np.uint8]) -> NDArray[np.uint8]:
-        display = frame.copy()
-
-        if self.locked_corners is not None:
-            corners = self.locked_corners.astype(np.int32)
-            cv2.polylines(display, [corners], True, (255, 0, 255), 3)
-            cv2.putText(
-                display, "LOCKED",
-                (int(corners[0][0]), int(corners[0][1]) - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-
-        status_text = (
-            "NOT CALIBRATED - Press SPACE to lock"
-            if self.locked_corners is None
-            else "CALIBRATED - Press SPACE to finish")
-        status_color = (
-            (0, 0, 255) if self.locked_corners is None else (0, 255, 0))
-        cv2.putText(
-            display, status_text,
-            (10, display.shape[0] - 20),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-
-        return display
-
-    def _try_lock_corners(self, frame: NDArray[np.uint8]) -> bool:
-        detected = self._detect_boundary(frame)
-        if detected is not None:
-            self.locked_corners = detected
-            dst = np.array([
-                [0, 0],
-                [self.warp_size - 1, 0],
-                [self.warp_size - 1, self.warp_size - 1],
-                [0, self.warp_size - 1]
-            ], dtype=np.float32)
-            self.warp_matrix = cv2.getPerspectiveTransform(
-                self.locked_corners, dst)
-            return True
-        return False
-
     def _detect_boundary(
             self, frame: NDArray[np.uint8]) -> Optional[NDArray[np.float32]]:
         aruco_dict = cv2.aruco.getPredefinedDictionary(
@@ -441,56 +401,13 @@ class Camera:
 
         return changed_count > threshold
 
-    def calibrate_colors_receiver(self) -> bool:
-        """Automatically detects and captures color calibration.
-        Monitors camera feed for color changes and captures all 8 colors.
-        Returns True on success."""
-        if not self._is_calibrated():
-            print("Error: Must complete geometric calibration first")
-            return False
-
-        print("Starting color calibration (receiver side)...")
-        print("Waiting for transmitter to show colors...")
-
-        # Initialize calibration array: (HEIGHT, WIDTH, 8 colors, 3 BGR)
-        self.calibrated_colors = np.zeros(
-            (HEIGHT, WIDTH, len(COLOR_MAP), 3), dtype=np.float32)
-
-        previous_samples = None
-        current_color_idx = 0
-        frames_since_change = 0
-        STABILIZATION_FRAMES = 3  # Wait 3 stable frames before capturing
-
-        while current_color_idx < len(COLOR_MAP):
-            current_samples = self._capture_color_samples()
-
-            if previous_samples is None:
-                # First frame
-                frames_since_change = 0
-            elif self._detect_color_change(previous_samples, current_samples):
-                # Change detected - reset counter
-                frames_since_change = 0
-            else:
-                # No change - increment counter
-                frames_since_change += 1
-
-            # If we've been stable long enough, capture this color
-            if frames_since_change == STABILIZATION_FRAMES:
-                self.calibrated_colors[:, :, current_color_idx, :] = \
-                    current_samples
-                print(f"  ✓ Captured color {current_color_idx}")
-                current_color_idx += 1
-                # Set to -1000 so we don't capture again until next change
-                frames_since_change = -1000
-
-            previous_samples = current_samples.copy()
-            cv2.waitKey(30)  # ~30ms between checks
-
-        print("✓ Color calibration complete!")
-        return True
-
     def send(self, frame: Frame) -> None:
-        cv2.imshow('Transmitter: Data', self._render_data(frame))
+        """Send a frame by displaying it.
+
+        Sets the display state. Frame will appear on next update() call.
+        """
+        self.display_data = frame
+        self.display_mode = "send_data"
 
     def _render_data(self, frame: Frame) -> NDArray[np.uint8]:
         size = self.display_size
@@ -560,50 +477,71 @@ class Camera:
 
         return Frame(data=data)
 
+    def update(self) -> int:
+        """Update and display the window. Returns key pressed (or -1).
+
+        Must be called regularly to keep window responsive.
+        Returns the key code if pressed, or -1 if no key.
+        """
+        # Get webcam frame
+        if self.test_mode:
+            if self.test_camera_input is None:
+                webcam_frame = np.zeros((self.display_size, self.display_size, 3), dtype=np.uint8)
+            else:
+                webcam_frame = self.test_camera_input
+        else:
+            ret, webcam_frame = self.cap.read()
+            if not ret:
+                webcam_frame = np.zeros((self.display_size, self.display_size, 3), dtype=np.uint8)
+
+        # Render and display
+        display = self._render_window(webcam_frame)
+        cv2.imshow('Camera Data Link', display)
+
+        # Return key pressed (or -1 if none)
+        return cv2.waitKey(30) & 0xFF
+
+    def cleanup(self) -> None:
+        """Clean up resources"""
+        cv2.destroyAllWindows()
+        if not self.test_mode:
+            self.cap.release()
+
 
 if __name__ == "__main__":
     cam = Camera(test_mode=False)
 
-    # Run calibration
+    # Run calibration (blocks until complete)
     if not cam.calibrate():
         print("Calibration cancelled")
-        cv2.destroyAllWindows()
-        cam.cap.release()
+        cam.cleanup()
         exit(0)
 
-    # Main data transmission loop
-    print("\nEntering data transmission mode...")
-    print("Press S to send random data, R to receive data, Q to quit")
+    # Data transmission mode
+    print("\nData transmission mode active!")
+    print("Press 'S' to send random data")
+    print("Press 'R' to receive data")
+    print("Press 'Q' to quit")
 
-    # Start with instructions
-    cam.display_mode = "instructions"
-
+    # Event loop with continuous update() calls
+    # The Camera class only handles keyboard for calibration
+    # This harness handles keyboard for send/receive
     while True:
-        # Get webcam frame
-        ret, webcam_frame = cam.cap.read()
-        if not ret:
-            webcam_frame = np.zeros((cam.display_size, cam.display_size, 3), dtype=np.uint8)
-
-        # Render and display
-        display = cam._render_window(webcam_frame)
-        cv2.imshow('Camera Data Link', display)
-
-        # Handle keyboard input
-        key = cv2.waitKey(30) & 0xFF
+        key = cam.update()
 
         if key == ord('q') or key == ord('Q'):
             break
         elif key == ord('s') or key == ord('S'):
-            # Send random data - switch to send_data mode and stay there
+            # Send random data
             data = np.random.randint(0, 8, (HEIGHT, WIDTH), dtype=np.int64)
-            cam.display_data = Frame(data=data)
-            cam.display_mode = "send_data"
-            print(f"Sending data:\n{data}")
+            frame = Frame(data=data)
+            cam.send(frame)
+            print(f"Sent data:\n{data}")
         elif key == ord('r') or key == ord('R'):
-            # Receive data - don't change display mode
+            # Receive data
             received = cam.receive()
             print(f"Received data:\n{received.data}")
 
     # Cleanup
-    cv2.destroyAllWindows()
-    cam.cap.release()
+    print("\nShutting down...")
+    cam.cleanup()
