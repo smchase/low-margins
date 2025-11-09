@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from camera import Camera, Frame, ROWS, COLS, COLORS  # noqa: E402
+from camera import Camera, Frame, ROWS, COLS, COLORS, SECONDS_PER_FRAME  # noqa: E402
 
 
 def load_test_data(filename: str = "test_data.json"):
@@ -26,51 +26,61 @@ if __name__ == "__main__":
 
     test_cases = load_test_data()
     print(f"\nLoaded {len(test_cases)} test cases")
+    print(f"Frame rate: {1/SECONDS_PER_FRAME:.2f} fps ({SECONDS_PER_FRAME}s per frame)")
     print("\n" + "="*60)
-    print("Press SPACE to start transmission (will wait for odd second)")
+    print("Press SPACE to start transmission (will sync to even second)")
     print("="*60)
-    
+
     while True:
         cam.update()
         key = cv2.waitKey(30) & 0xFF
         if key == ord(' '):
             break
-    
-    while int(time.time()) % 2 == 0:
+
+    # Wait for the next even second boundary
+    # If we're currently at an even second, wait for it to pass first
+    if int(time.time()) % 2 == 0:
+        current = int(time.time())
+        while int(time.time()) == current:
+            cam.update()
+            cv2.waitKey(30)
+
+    # Now wait for the next even second
+    while int(time.time()) % 2 == 1:
         cam.update()
         cv2.waitKey(30)
-    
-    print(f"GO! Transmitting on odd seconds...")
-    
-    current_test_idx = 0
-    last_second = -1
-    
-    while current_test_idx < len(test_cases):
+
+    # We're at an even second boundary - record start time
+    start_time = time.time()
+    print(f"GO! Starting transmission at t={start_time:.3f}")
+
+    frame_number = 0
+
+    while frame_number < len(test_cases):
         cam.update()
-        
-        current_time = time.time()
-        current_second = int(current_time)
-        
-        # Transmit on odd seconds
-        if current_second != last_second and current_second % 2 == 1:
-            data = test_cases[current_test_idx]
+
+        elapsed = time.time() - start_time
+        target_time = frame_number * SECONDS_PER_FRAME
+
+        # Transmit when we've reached or passed the target time for this frame
+        if elapsed >= target_time:
+            data = test_cases[frame_number]
             frame = Frame(data=data)
             cam.transmit(frame)
-            print(f"[ODD {current_second}] Transmitted test case {current_test_idx}")
-            current_test_idx += 1
-            last_second = current_second
-        
+            print(f"[t={elapsed:.3f}s] Transmitted frame {frame_number} (target: {target_time:.3f}s)")
+            frame_number += 1
+
         cv2.waitKey(30)
     
-    if current_test_idx >= len(test_cases):
+    if frame_number >= len(test_cases):
         print(f"\n✓ All {len(test_cases)} test cases transmitted!")
-        print("Waiting 2 seconds for receiver to capture last frame...")
-        
-        # Wait 2 seconds while keeping the last frame displayed
-        end_time = time.time() + 2
+        print(f"Waiting {SECONDS_PER_FRAME * 2:.1f}s for receiver to capture last frame...")
+
+        # Wait for 2 frame periods to ensure receiver gets the last frame
+        end_time = time.time() + (SECONDS_PER_FRAME * 2)
         while time.time() < end_time:
             cam.update()
             cv2.waitKey(30)
-        
+
         print("Done!") 
 
