@@ -32,8 +32,12 @@ class Receiver:
         self.warp_size = 600
         self.debug_warped = None  # Store warped image for debugging
         self.debug_gray = None  # Store grayscale for debugging
+        self.debug_color_samples = None  # Store color sampling overlay
+        self.debug_sample_grid = None  # Store sample grid visualization
         self.border_ratio = 0.0  # No border - calibration locks to outer edge
         self.flip_horizontal = False  # Toggle for horizontal flip
+        self.show_sample_regions = False
+        self.sample_polys = None
 
     def calibrate(self, frame):
         """Detect and lock onto the grid"""
@@ -195,7 +199,28 @@ class Receiver:
             return None
         if border_ratio is None:
             border_ratio = self.border_ratio
-        return read_color_pattern(frame, self.locked_corners, grid_size, border_ratio)
+        pattern_result = read_color_pattern(
+            frame,
+            self.locked_corners,
+            grid_size,
+            border_ratio,
+            brightness_adjust=0,
+            return_debug=self.show_sample_regions,
+        )
+        if self.show_sample_regions:
+            pattern, debug_img, sample_polys, sample_grid = pattern_result
+            self.debug_color_samples = debug_img
+            self.sample_polys = sample_polys
+            self.debug_sample_grid = sample_grid
+        else:
+            pattern = pattern_result
+            self.debug_color_samples = None
+            self.sample_polys = None
+            self.debug_sample_grid = None
+        # Flip horizontally if enabled (for facing cameras)
+        if pattern is not None and self.flip_horizontal:
+            pattern = np.fliplr(pattern)
+        return pattern
 
     def _order_points(self, pts):
         """Order points: TL, TR, BR, BL"""
@@ -209,8 +234,15 @@ class Receiver:
         return rect
 
 
-def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05, brightness_adjust=0):
-    """Warp locked region and quantize each cell to the nearest palette color."""
+def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05,
+                       brightness_adjust=0, return_debug=False):
+    """Warp locked region and quantize each cell to the nearest palette color.
+
+    When return_debug is True, also returns:
+      - the warped image with sample rectangles drawn
+      - the polygons (in the original camera space) for overlaying
+      - a simplified sample-grid visualization
+    """
     if locked_corners is None:
         return None
 
@@ -220,6 +252,15 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05, brig
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
 
     warped = cv2.warpPerspective(frame, M, (size, size))
+    debug_img = None
+    sample_polys = None
+    sample_grid = None
+    if return_debug:
+        debug_img = warped.copy()
+        sample_polys = []
+        sample_grid = np.zeros_like(warped)
+        sample_grid[:] = 32
+        M_inv = np.linalg.inv(M).astype(np.float32)
     
     # Apply brightness adjustment if needed
     if brightness_adjust != 0:
@@ -245,6 +286,15 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05, brig
             cell_region = warped[y1:y2, x1:x2]
             mean_color = cell_region.mean(axis=(0, 1))
             row_samples.append(mean_color)
+            if return_debug:
+                cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 1)
+                cv2.rectangle(sample_grid, (x1, y1), (x2, y2), (0, 255, 0), 1)
+                rect = np.array([[[x1, y1],
+                                   [x2, y1],
+                                   [x2, y2],
+                                   [x1, y2]]], dtype=np.float32)
+                orig_rect = cv2.perspectiveTransform(rect, M_inv)
+                sample_polys.append(orig_rect.reshape(-1, 2))
         samples.append(row_samples)
 
     samples = np.array(samples, dtype=np.float32)
@@ -253,17 +303,42 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05, brig
     dist = np.sum(diff * diff, axis=-1)
     color_indices = np.argmin(dist, axis=2).astype(np.uint8)
 
+    if return_debug:
+        sample_polys = [poly.astype(np.int32) for poly in sample_polys]
+        return color_indices, debug_img, sample_polys, sample_grid
     return color_indices
 
 
 def is_calibration_pattern(color_indices):
-    """Heuristic: calibration flashes only use black/white cells."""
+    """Heuristic: calibration patterns alternate between all-black, all-white, or checkerboard."""
     if color_indices is None:
         return True
     uniques = np.unique(color_indices)
     if uniques.size == 0:
         return True
-    return np.all(np.isin(uniques, (0, 7)))
+    
+    # Only consider it calibration if it's strictly black/white AND has a specific pattern
+    if set(uniques) == {0, 7}:  # Only black and white
+        # Check if it's a checkerboard pattern
+        rows, cols = color_indices.shape
+        is_checkerboard = True
+        for i in range(rows):
+            for j in range(cols):
+                expected = 7 if (i + j) % 2 == 0 else 0
+                if color_indices[i, j] != expected and color_indices[i, j] != (7 - expected):
+                    is_checkerboard = False
+                    break
+            if not is_checkerboard:
+                break
+        return is_checkerboard
+    
+    # All one color patterns during calibration are only black or white
+    if len(uniques) == 1 and uniques[0] in [0, 7]:
+        # But during data transmission, we might have all-black frames that are valid data
+        # So we can't just reject all single-color frames
+        return False  # Consider single-color frames as data, not calibration
+    
+    return False
 
 
 START_SIGNAL_COLOR_INDEX = 2  # Green in COLORS_8 palette
@@ -369,6 +444,7 @@ class CodecTransmitterDisplay:
         self.remaining_start_frames = self.start_signal_frames
         print(f"\n[TX] Starting auto-transmission at {self.fps:.2f} FPS "
               f"({self.total_frames} frames)")
+        print(f"[TX] First data frame will be Grid 1, frame 0 (lower phase with colors 0-7)")
 
     def update(self):
         if not self.transmitting or self.done:
@@ -382,6 +458,7 @@ class CodecTransmitterDisplay:
                 self.remaining_start_frames -= 1
                 if self.remaining_start_frames == 0:
                     print("[TX] Start signal complete, streaming data...")
+                    print(f"[TX] Starting with Grid 1, frame {self.current_color_frame} ({'lower' if self.current_color_frame == 0 else 'upper'})")
             return
 
         if now - self.last_frame_time >= self.frame_interval:
@@ -516,6 +593,68 @@ def create_test_pattern_tensor(rows, cols):
     return tensor.astype(np.float16)
 
 
+def create_color_test_pattern_tensor(rows, cols):
+    """Create a simple test pattern that cycles through all 8 palette colors.
+
+    This creates a tensor that when encoded will produce grids with values 0-7,
+    which map to the 8 colors in COLORS_8 palette in the lower phase.
+    """
+    # The codec encodes values in range [min_val, max_val] to [0, 15]
+    # We want encoded grid values 0-7 to test all 8 colors
+    # Create a simple repeating pattern of values 0-7
+    tensor = np.zeros((rows, cols), dtype=np.float16)
+    for i in range(rows):
+        for j in range(cols):
+            # Create a pattern that cycles through 0-7
+            value = (i * cols + j) % 8
+            tensor[i, j] = value
+
+    return tensor
+
+
+def verify_color_test_pattern(decoded_tensor, rows, cols):
+    """Verify that the decoded tensor matches the color test pattern."""
+    expected = create_color_test_pattern_tensor(rows, cols)
+
+    print("\n[RX] Verifying color test pattern...")
+    print(f"[RX] Expected first row: {expected[0, :min(10, cols)]}")
+    print(f"[RX] Decoded first row:  {decoded_tensor[0, :min(10, cols)]}")
+
+    # Check a sample of cells
+    total_checked = 0
+    correct = 0
+    errors = []
+
+    for i in range(rows):
+        for j in range(cols):
+            expected_val = expected[i, j]
+            decoded_val = decoded_tensor[i, j]
+            total_checked += 1
+
+            if np.isnan(decoded_val):
+                errors.append(f"[{i},{j}]: NaN (expected {expected_val})")
+            elif abs(decoded_val - expected_val) < 0.01:  # Allow small error
+                correct += 1
+            else:
+                if len(errors) < 10:  # Only show first 10 errors
+                    errors.append(f"[{i},{j}]: {decoded_val:.3f} (expected {expected_val:.3f})")
+
+    accuracy = correct / total_checked * 100 if total_checked > 0 else 0
+    print(f"[RX] Accuracy: {correct}/{total_checked} cells correct ({accuracy:.1f}%)")
+
+    if errors:
+        print(f"[RX] Sample errors (showing up to 10):")
+        for err in errors[:10]:
+            print(f"  {err}")
+
+    if accuracy > 99.0:
+        print("[RX] ✅ Color test pattern verified correctly!")
+        return True
+    else:
+        print("[RX] ⚠️  Color test pattern did not match")
+        return False
+
+
 def load_tensor(args):
     if args.tensor:
         tensor = np.load(args.tensor)
@@ -525,6 +664,14 @@ def load_tensor(args):
             tensor = tensor.astype(np.float16)
         return tensor
 
+    if hasattr(args, 'color_test_pattern') and args.color_test_pattern:
+        # Create a simple color test pattern
+        tensor = create_color_test_pattern_tensor(args.rows, args.cols)
+        print(f"[TX] Using color test pattern (cycles through colors 0-7)")
+        print(f"[TX] First row: {tensor[0, :min(10, args.cols)]}")
+        print(f"[TX] Pattern repeats every 8 cells")
+        return tensor
+
     if args.test_pattern:
         # Create a known test pattern
         tensor = create_test_pattern_tensor(args.rows, args.cols)
@@ -532,13 +679,17 @@ def load_tensor(args):
         print(f"[TX] First row: {tensor[0, :10]}")
         print(f"[TX] Diagonal: {[tensor[i, i] for i in range(min(10, args.rows, args.cols))]}")
         return tensor
-    
+
     rng = np.random.default_rng(args.seed)
     tensor = rng.standard_normal((args.rows, args.cols)).astype(np.float16)
     return tensor
 
 
 def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force_alternating=False):
+    # Validate codec_obj is actually a codec object
+    if not hasattr(codec_obj, 'grids_needed'):
+        raise TypeError(f"codec_obj must be a codec object, got {type(codec_obj)}: {codec_obj}")
+    
     rows_per_slice, cols_per_slice, num_row_slices, num_col_slices = compute_slice_layout(rows, cols, grid_size)
     expected = codec_obj.grids_needed() * num_row_slices * num_col_slices * 2
     if len(color_frames) < expected:
@@ -567,18 +718,33 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force
                     phase1 = classify_frame_phase(frame1)
                     frame2 = next(frame_iter)
                     phase2 = classify_frame_phase(frame2)
+                    unique1 = np.unique(frame1)
+                    unique2 = np.unique(frame2)
                     
                     if force_alternating:
-                        # Force alternating pattern: even frames are lower, odd are upper
-                        lower, upper = frame1, frame2
-                        print(f"[RX] Grid {grid_idx+1}: Forcing alternating pattern (frame1=lower, frame2=upper)")
+                        swapped = False
+                        # Lower phase should have a richer palette (0-7). Upper frames are binary.
+                        warning_binary = False
+                        if unique1.size <= 2 and unique2.size > 2:
+                            lower, upper = frame2, frame1
+                            swapped = True
+                        elif unique1.size > 2 and unique2.size <= 2:
+                            lower, upper = frame1, frame2
+                        else:
+                            # Both look multi-valued (likely noise) - default to frame1 lower
+                            lower, upper = frame1, frame2
+                            if unique1.size <= 2 and unique2.size <= 2:
+                                warning_binary = True
+                        if swapped:
+                            print(f"[RX] Grid {grid_idx+1}: Forcing alternating - frame1=upper, frame2=lower (auto swap)")
+                        else:
+                            print(f"[RX] Grid {grid_idx+1}: Forcing alternating - frame1=lower, frame2=upper")
+                        if warning_binary:
+                            print(f"[RX] WARNING: Both frames look binary; assuming frame1 is lower due to start-signal alignment.")
                     else:
                         # For robustness, determine phase by looking at value distribution
                         # Lower phase should have more diverse values (0-7)
                         # Upper phase should be mostly 0s and 1s
-                        
-                        unique1 = np.unique(frame1)
-                        unique2 = np.unique(frame2)
                         
                         # Count how many cells are 0 or 1 in each frame
                         binary_ratio1 = np.sum((frame1 == 0) | (frame1 == 1)) / frame1.size
@@ -599,14 +765,20 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force
                     slice_values = lower_bits | (upper_bit << 3)
                     col_blocks.append(slice_values)
                     
-                    # Debug: show sample values and unique values in each frame
+                    # Debug: show unique values for all grids
+                    lower_unique = np.unique(lower)
+                    upper_unique = np.unique(upper) 
+                    print(f"[RX] Grid {grid_idx+1} decode: lower has {len(lower_unique)} unique values: {lower_unique}, "
+                          f"upper has {len(upper_unique)} unique values: {upper_unique}")
+                    
                     if grid_idx == 0 and row_idx == 0 and col_idx == 0:  # First slice of first grid
-                        lower_unique = np.unique(lower)
-                        upper_unique = np.unique(upper)
-                        print(f"[RX] Sample decode: lower unique values: {lower_unique}, upper unique values: {upper_unique}")
                         print(f"[RX] Sample decode: lower[0,0]={lower[0,0]} -> {lower_bits[0,0]}, "
                               f"upper[0,0]={upper[0,0]} -> {upper_bit[0,0]}, "
                               f"combined={slice_values[0,0]}")
+                        
+                    # Warn if phases seem swapped
+                    if len(lower_unique) <= 2 and len(upper_unique) > 2:
+                        print(f"[RX] WARNING: Phases may be swapped! Lower should have 0-7, upper should have 0-1")
                 row_bands.append(np.hstack(col_blocks))
             full_grid = np.vstack(row_bands)
             grids.append(full_grid[:rows, :cols])
@@ -629,6 +801,54 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force
     return stacked_grids
 
 
+def generate_expected_color_frames(tensor, codec_obj, grid_size, flip_horizontal=False):
+    """Generate the exact color indices TX should produce for each frame."""
+    encoded = codec_obj.encode(tensor)
+    rows_per_slice, cols_per_slice, num_row_slices, num_col_slices = compute_slice_layout(
+        codec_obj.rows, codec_obj.cols, grid_size)
+    frames = []
+    for grid_idx in range(encoded.shape[0]):
+        full_grid = encoded[grid_idx]
+        for row_idx in range(num_row_slices):
+            start_row = row_idx * rows_per_slice
+            end_row = min(start_row + rows_per_slice, full_grid.shape[0])
+            for col_idx in range(num_col_slices):
+                start_col = col_idx * cols_per_slice
+                end_col = min(start_col + cols_per_slice, full_grid.shape[1])
+                slice_values = np.zeros((rows_per_slice, cols_per_slice), dtype=full_grid.dtype)
+                window = full_grid[start_row:end_row, start_col:end_col]
+                slice_values[:window.shape[0], :window.shape[1]] = window
+                lower = (slice_values & 0x07).astype(np.uint8)
+                upper = ((slice_values >> 3) & 0x01).astype(np.uint8)
+                if flip_horizontal:
+                    lower = np.fliplr(lower)
+                    upper = np.fliplr(upper)
+                frames.append(lower)
+                frames.append(upper)
+    return frames
+
+
+def compare_captured_to_expected(captured_frames, expected_frames):
+    total_expected = len(expected_frames)
+    if len(captured_frames) != total_expected:
+        print(f"[RX DEBUG] Expected {total_expected} frames but captured {len(captured_frames)}.")
+    for idx, (captured, expected) in enumerate(zip(captured_frames, expected_frames), start=1):
+        if captured.shape != expected.shape:
+            print(f"[RX DEBUG] Frame {idx}: shape mismatch captured {captured.shape} vs expected {expected.shape}")
+            continue
+        matches = np.count_nonzero(captured == expected)
+        total = captured.size
+        mismatch = total - matches
+        match_pct = matches / max(1, total) * 100.0
+        if mismatch == 0:
+            print(f"[RX DEBUG] Frame {idx}: ✅ match ({match_pct:.2f}% cells equal)")
+        else:
+            diff = captured.astype(np.int16) - expected.astype(np.int16)
+            unique_diff = np.unique(diff)
+            print(f"[RX DEBUG] Frame {idx}: ⚠️ {mismatch}/{total} cells differ ({match_pct:.2f}% match). "
+                  f"Differences: {unique_diff[:5]}")
+
+
 def run_tx(args):
     tensor = load_tensor(args)
     tx = CodecTransmitterDisplay(tensor, args.grid_size, args.fps, args.start_signal_seconds)
@@ -649,9 +869,9 @@ def run_tx(args):
     print("Use this window full-screen facing the receiver camera.\n")
 
     while True:
-        tx.update()
-        frame = tx.render()
+        frame = tx.render()  # Render current state
         cv2.imshow("Codec TX", frame)
+        tx.update()  # Then advance to next frame
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
@@ -677,9 +897,14 @@ def run_rx(args):
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     rx = Receiver(grid_size=args.grid_size)
-    c = codec(args.rows, args.cols, min_val=0, max_val=15)
+    if args.flip_horizontal:
+        rx.flip_horizontal = True
+        print("[RX] Horizontal flip enabled (for facing cameras)")
+    codec_obj = codec(args.rows, args.cols, min_val=0, max_val=15)
+    if not hasattr(codec_obj, 'grids_needed'):
+        raise TypeError(f"Failed to create codec object: got {type(codec_obj)}")
     layout = compute_slice_layout(args.rows, args.cols, args.grid_size)
-    total_frames_needed = c.grids_needed() * layout[2] * layout[3] * 2
+    total_frames_needed = codec_obj.grids_needed() * layout[2] * layout[3] * 2
 
     captured_frames = []
     capture_active = False
@@ -695,17 +920,45 @@ def run_rx(args):
     expected_phase = "lower"
     last_capture_time = 0  # Track when we last captured a frame
     min_capture_interval = args.capture_interval  # Minimum seconds between captures
+    waiting_for_start_signal = False
+    waiting_for_first_data_frame = False
+    start_signal_detected = False
+    start_signal_wait_start = 0.0
+    start_signal_wait_logged = False
+    expected_frames = None
+    if args.debug_frame_compare:
+        reference_tensor = None
+        if hasattr(args, 'verify_color_test_pattern') and args.verify_color_test_pattern:
+            reference_tensor = create_color_test_pattern_tensor(args.rows, args.cols)
+        elif args.verify_test_pattern:
+            reference_tensor = create_test_pattern_tensor(args.rows, args.cols)
+        elif args.tensor:
+            try:
+                reference_tensor = np.load(args.tensor)
+                if reference_tensor.shape != (args.rows, args.cols):
+                    print(f"[RX] ⚠️  Reference tensor shape {reference_tensor.shape} does not match "
+                          f"--rows/--cols ({args.rows}, {args.cols}); ignoring.")
+                    reference_tensor = None
+                elif reference_tensor.dtype != np.float16:
+                    reference_tensor = reference_tensor.astype(np.float16)
+            except Exception as ex:
+                print(f"[RX] ⚠️  Could not load reference tensor from {args.tensor}: {ex}")
+        if reference_tensor is None:
+            print("[RX] ⚠️  Frame comparison requested but no reference tensor available.")
+        else:
+            expected_frames = generate_expected_color_frames(
+                reference_tensor, codec_obj, args.grid_size, flip_horizontal=args.flip_horizontal)
 
     print("\n" + "=" * 70)
     print("RX MODE - CODEC VISUAL LINK")
     print("=" * 70)
     print(f"Expecting {total_frames_needed} frames "
-          f"({c.grids_needed()} grids × {layout[2]} row slices × {layout[3]} col slices × 2 color frames)")
+          f"({codec_obj.grids_needed()} grids × {layout[2]} row slices × {layout[3]} col slices × 2 color frames)")
     print("Controls:")
     print("  c   - Calibrate (lock onto TX grid)")
     print("  p   - Start capture (after calibration)")
     print("  r   - Reset captured frames")
-    print("  f   - Toggle horizontal flip")
+    print("  f   - Toggle horizontal flip (IMPORTANT: enable if cameras face each other!)")
     print("  +/- - Adjust border offset")
     print("  q   - Quit")
     print("=" * 70)
@@ -750,12 +1003,48 @@ def run_rx(args):
             status_text = "LOCKED"
             status_color = (0, 255, 0)
 
+            # Update sample regions for visualization (even when not capturing)
+            if rx.show_sample_regions:
+                _ = rx.read_color_pattern(frame, args.grid_size)
+
+            # Draw sample region overlays on camera feed
+            if rx.show_sample_regions and rx.sample_polys:
+                for poly in rx.sample_polys:
+                    pts = poly.reshape((-1, 1, 2))
+                    cv2.polylines(display, [pts], True, (0, 255, 255), 1, cv2.LINE_AA)
+
             if capture_active:
                 pattern = rx.read_color_pattern(frame, args.grid_size)
                 if pattern is None:
                     continue
-                if is_calibration_pattern(pattern) or is_start_signal(pattern):
-                    continue
+                # Wait for TX start signal (unless skipped)
+                if waiting_for_start_signal:
+                    if is_start_signal(pattern):
+                        start_signal_detected = True
+                        waiting_for_start_signal = False
+                        waiting_for_first_data_frame = True
+                        start_signal_wait_logged = False
+                        print("\n[RX] Start signal detected! Waiting for first data frame...")
+                    else:
+                        if start_signal_wait_start == 0.0:
+                            start_signal_wait_start = time.time()
+                        elif (not start_signal_wait_logged and
+                              time.time() - start_signal_wait_start > 2.0):
+                            print("\n[RX] Waiting for start signal... ensure TX has started and showing solid green.")
+                            start_signal_wait_logged = True
+                        continue
+                if waiting_for_first_data_frame:
+                    if is_start_signal(pattern):
+                        continue
+                    waiting_for_first_data_frame = False
+                    expected_phase = "lower"
+                    print("\n[RX] Start signal complete - capturing data frames.")
+                if len(captured_frames) == 0:
+                    if is_calibration_pattern(pattern):
+                        continue
+                    if not args.skip_start_signal and not start_signal_detected:
+                        # Still haven't seen the start signal; keep waiting
+                        continue
 
                 phase = classify_frame_phase(pattern)
                 if phase is None:
@@ -792,6 +1081,7 @@ def run_rx(args):
                     pending_pattern = pattern.copy()
                     pending_phase = phase
                     pending_consistency = 1
+                    phase_seen_time = now  # Reset timer whenever phase changes
                     continue
 
                 diff_pending = count_changed_cells(pattern, pending_pattern)
@@ -833,9 +1123,15 @@ def run_rx(args):
                     if total_captured >= total_frames_needed:
                         print("\n[RX] Frames collected - decoding...")
                         try:
-                            grids = decode_captured_frames(captured_frames, c, args.rows, args.cols, args.grid_size, 
+                            # Debug: verify codec object
+                            if not hasattr(codec_obj, 'grids_needed'):
+                                raise TypeError(f"Codec object is not valid: {type(codec_obj)}")
+                            grids = decode_captured_frames(captured_frames, codec_obj, args.rows, args.cols, args.grid_size, 
                                                           force_alternating=args.force_alternating)
-                            decoded_tensor = c.decode(grids)
+                            if expected_frames is not None:
+                                print("\n[RX] Comparing captured frames to expected values...")
+                                compare_captured_to_expected(captured_frames, expected_frames)
+                            decoded_tensor = codec_obj.decode(grids)
                             
                             # Check for NaN values
                             nan_count = np.isnan(decoded_tensor).sum()
@@ -865,7 +1161,9 @@ def run_rx(args):
                                       f"max={valid_values.max():.3f}, mean={valid_values.mean():.3f}")
                             
                             # If test pattern mode, verify known values
-                            if args.verify_test_pattern:
+                            if hasattr(args, 'verify_color_test_pattern') and args.verify_color_test_pattern:
+                                verify_color_test_pattern(decoded_tensor, args.rows, args.cols)
+                            elif args.verify_test_pattern:
                                 print("\n[RX] Verifying test pattern values...")
                                 expected = create_test_pattern_tensor(args.rows, args.cols)
                                 
@@ -904,6 +1202,11 @@ def run_rx(args):
                         capture_active = False
                         phase_seen_time = None
                         expected_phase = "lower"
+                        waiting_for_start_signal = False
+                        waiting_for_first_data_frame = False
+                        start_signal_detected = False
+                        start_signal_wait_start = 0.0
+                        start_signal_wait_logged = False
             else:
                 capture_active = False
                 last_pattern = None
@@ -912,6 +1215,11 @@ def run_rx(args):
                 pending_consistency = 0
                 phase_seen_time = None
                 expected_phase = "lower"
+                waiting_for_start_signal = False
+                waiting_for_first_data_frame = False
+                start_signal_detected = False
+                start_signal_wait_start = 0.0
+                start_signal_wait_logged = False
 
         if capture_active:
             info = f"CAPTURING {len(captured_frames)}/{total_frames_needed}"
@@ -929,6 +1237,10 @@ def run_rx(args):
             cv2.imshow('Debug: Grayscale', rx.debug_gray)
         if rx.debug_warped is not None:
             cv2.imshow('Debug: Binary + Grid', rx.debug_warped)
+        if rx.show_sample_regions and rx.debug_color_samples is not None:
+            cv2.imshow('Debug: Color Samples', rx.debug_color_samples)
+        if rx.show_sample_regions and rx.debug_sample_grid is not None:
+            cv2.imshow('Debug: Sample Grid', rx.debug_sample_grid)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
@@ -946,6 +1258,11 @@ def run_rx(args):
                 phase_seen_time = None
                 expected_phase = "lower"
                 last_capture_time = 0  # Reset capture timing
+                waiting_for_start_signal = False
+                waiting_for_first_data_frame = False
+                start_signal_detected = False
+                start_signal_wait_start = 0.0
+                start_signal_wait_logged = False
                 print("\n[RX] Calibration reset")
             else:
                 if rx.calibrate(frame):
@@ -965,7 +1282,15 @@ def run_rx(args):
                 phase_seen_time = None
                 expected_phase = "lower"
                 last_capture_time = 0  # Reset capture timing
-                print("\n[RX] Capture started - waiting for frames...")
+                waiting_for_start_signal = not args.skip_start_signal
+                waiting_for_first_data_frame = False
+                start_signal_detected = args.skip_start_signal
+                start_signal_wait_start = time.time() if waiting_for_start_signal else 0.0
+                start_signal_wait_logged = False
+                if waiting_for_start_signal:
+                    print("\n[RX] Capture started - waiting for TX start signal (solid green)...")
+                else:
+                    print("\n[RX] Capture started - waiting for frames...")
         elif key == ord('r'):
             captured_frames.clear()
             last_pattern = None
@@ -976,6 +1301,11 @@ def run_rx(args):
             expected_phase = "lower"
             last_capture_time = 0  # Reset capture timing
             capture_active = False
+            waiting_for_start_signal = False
+            waiting_for_first_data_frame = False
+            start_signal_detected = False
+            start_signal_wait_start = 0.0
+            start_signal_wait_logged = False
             print("\n[RX] Captured frames cleared")
         elif key == ord('f'):
             rx.flip_horizontal = not rx.flip_horizontal
@@ -986,6 +1316,22 @@ def run_rx(args):
         elif key == ord('-') or key == ord('_'):
             rx.border_ratio = max(0.0, rx.border_ratio - 0.01)
             print(f"\n[RX] Border: {rx.border_ratio:.3f}")
+        elif key == ord('d'):
+            rx.show_sample_regions = not rx.show_sample_regions
+            state = "ON" if rx.show_sample_regions else "OFF"
+            print(f"\n[RX] Sample region overlay: {state}")
+            if not rx.show_sample_regions:
+                rx.debug_color_samples = None
+                rx.sample_polys = None
+                rx.debug_sample_grid = None
+                try:
+                    cv2.destroyWindow('Debug: Color Samples')
+                except cv2.error:
+                    pass
+                try:
+                    cv2.destroyWindow('Debug: Sample Grid')
+                except cv2.error:
+                    pass
 
     cap.release()
     cv2.destroyAllWindows()
@@ -1003,6 +1349,7 @@ def build_arg_parser():
     parser.add_argument('--tensor', type=str, help='Path to .npy tensor for TX mode')
     parser.add_argument('--seed', type=int, default=42, help='Seed for random tensor (TX)')
     parser.add_argument('--test-pattern', action='store_true', help='Use test pattern tensor instead of random (TX)')
+    parser.add_argument('--color-test-pattern', action='store_true', help='Use simple color test pattern (cycles 0-7) for TX mode')
     parser.add_argument('--camera-index', type=int, default=0, help='Camera index for RX mode')
     parser.add_argument('--save-decoded', type=str, help='Path to save decoded tensor (RX mode)')
     parser.add_argument('--capture-threshold', type=float, default=0.05,
@@ -1021,6 +1368,14 @@ def build_arg_parser():
                         help='Minimum seconds between frame captures (RX)')
     parser.add_argument('--verify-test-pattern', action='store_true',
                         help='Verify decoded tensor against test pattern (RX)')
+    parser.add_argument('--verify-color-test-pattern', action='store_true',
+                        help='Verify decoded tensor against color test pattern (RX)')
+    parser.add_argument('--flip-horizontal', action='store_true',
+                        help='Enable horizontal flip for facing cameras (RX)')
+    parser.add_argument('--skip-start-signal', action='store_true',
+                        help='Start capturing immediately without waiting for TX start signal (RX)')
+    parser.add_argument('--debug-frame-compare', action='store_true',
+                        help='Compare each captured frame against expected values (requires known tensor)')
     return parser
 
 
