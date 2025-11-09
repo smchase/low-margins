@@ -46,10 +46,23 @@ class Camera:
             )
 
     def calibrate(self) -> bool:
-        print("Press SPACE to lock, then SPACE again to start color calibration")
+        print("Press SPACE to lock corners")
 
-        # Phase 1: Geometric calibration
+        import time
+
+        # State machine
+        state = "locking"  # locking -> receiving_colors -> waiting_to_transmit -> transmitting -> done
+
+        # Color calibration tracking
+        self.calibrated_colors = None
+        prev_samples = None
+        color_idx = 0
+        frames_stable = 0
+        STABILIZATION_FRAMES = 3
+        transmit_start_time = None
+
         while True:
+            # Read camera frame
             if self.test_mode:
                 if self.test_camera_input is None:
                     print("No test camera input")
@@ -61,100 +74,78 @@ class Camera:
                     print("Failed to read from camera")
                     return False
 
-            cv2.imshow(
-                'Transmitter: Calibration Pattern',
-                self._render_calibration_boundary()
-            )
-            cv2.imshow(
-                'Receiver: Camera View',
-                self._render_receiver_display(frame)
-            )
+            # Display based on state
+            if state in ["locking", "receiving_colors"]:
+                cv2.imshow('Transmitter: Calibration Pattern',
+                          self._render_calibration_boundary())
+            elif state == "transmitting":
+                elapsed = time.time() - transmit_start_time
+                current_color = min(int(elapsed), 7)
+                cv2.imshow('Transmitter: Calibration Pattern',
+                          self._render_color_calibration_pattern(current_color))
+            elif state == "waiting_to_transmit":
+                cv2.imshow('Transmitter: Calibration Pattern',
+                          self._render_calibration_boundary())
+
+            cv2.imshow('Receiver: Camera View',
+                      self._render_receiver_display(frame))
 
             key = cv2.waitKey(30) & 0xFF
-            if key == ord(' '):
-                if self._is_calibrated():
-                    # Geometric calibration done, move to color calibration
-                    break
-                else:
+
+            # State: locking
+            if state == "locking":
+                if key == ord(' '):
                     if self._try_lock_corners(frame):
                         print("\n✓ Corners locked!")
-                        print(
-                            f"    Corners: "
-                            f"{self.locked_corners.astype(int).tolist()}")
-                        print("\n    Press SPACE again to start color calibration.")
+                        print(f"    Corners: {self.locked_corners.astype(int).tolist()}")
+                        print("\nWaiting for other side to transmit colors...")
+                        state = "receiving_colors"
+                        # Initialize calibration array
+                        self.calibrated_colors = np.zeros(
+                            (HEIGHT, WIDTH, len(COLOR_MAP), 3), dtype=np.float32)
+                        prev_samples = None
+                        color_idx = 0
+                        frames_stable = 0
                     else:
-                        print(
-                            "✗ No boundary detected. "
-                            "Make sure other side is showing boundary."
-                        )
+                        print("✗ No boundary detected. Make sure other side is showing boundary.")
 
-        # Phase 2: Color calibration
-        print("\n" + "="*60)
-        print("COLOR CALIBRATION")
-        print("="*60)
-        print("Starting automatic color calibration (both sides)...")
-        print("This will take ~8 seconds...")
+            # State: receiving_colors
+            elif state == "receiving_colors":
+                curr_samples = self._capture_color_samples()
 
-        import time
+                if prev_samples is None:
+                    frames_stable = 0
+                elif self._detect_color_change(prev_samples, curr_samples):
+                    frames_stable = 0
+                else:
+                    frames_stable += 1
 
-        # Initialize calibration array
-        self.calibrated_colors = np.zeros(
-            (HEIGHT, WIDTH, len(COLOR_MAP), 3), dtype=np.float32)
+                if frames_stable == STABILIZATION_FRAMES:
+                    self.calibrated_colors[:, :, color_idx, :] = curr_samples
+                    print(f"  ✓ Captured color {color_idx}")
+                    color_idx += 1
+                    frames_stable = -1000
 
-        # Track receiver state
-        prev_samples = None
-        color_idx = 0
-        frames_stable = 0
-        STABILIZATION_FRAMES = 3
+                    if color_idx >= 8:
+                        print("\n✓ Color calibration received!")
+                        print("Press SPACE to transmit your colors for the other side")
+                        state = "waiting_to_transmit"
 
-        start_time = time.time()
+                prev_samples = curr_samples.copy()
 
-        while color_idx < 8:
-            elapsed = time.time() - start_time
-            current_color = min(int(elapsed), 7)
+            # State: waiting_to_transmit
+            elif state == "waiting_to_transmit":
+                if key == ord(' '):
+                    print("\nTransmitting colors...")
+                    state = "transmitting"
+                    transmit_start_time = time.time()
 
-            # Read camera frame
-            if self.test_mode:
-                frame = self.test_camera_input
-            else:
-                ret, frame = self.cap.read()
-                if not ret:
-                    print("Failed to read from camera")
-                    return False
-
-            # Transmit current color
-            pattern = self._render_color_calibration_pattern(current_color)
-            cv2.imshow('Transmitter: Calibration Pattern', pattern)
-            cv2.imshow('Receiver: Camera View', frame)
-            cv2.waitKey(30)
-
-            # Receive and detect
-            curr_samples = self._capture_color_samples()
-            if prev_samples is None:
-                frames_stable = 0
-            elif self._detect_color_change(prev_samples, curr_samples):
-                frames_stable = 0
-            else:
-                frames_stable += 1
-
-            if frames_stable == STABILIZATION_FRAMES:
-                self.calibrated_colors[:, :, color_idx, :] = curr_samples
-                print(f"  ✓ Captured color {color_idx}")
-                color_idx += 1
-                frames_stable = -1000
-
-            prev_samples = curr_samples.copy()
-
-            # Timeout after 10 seconds
-            if elapsed > 10:
-                break
-
-        if color_idx == 8:
-            print("\n✓ Calibration complete!")
-            return True
-        else:
-            print(f"\n✗ Calibration incomplete ({color_idx}/8 colors)")
-            return False
+            # State: transmitting
+            elif state == "transmitting":
+                elapsed = time.time() - transmit_start_time
+                if elapsed >= 8:
+                    print("\n✓ Calibration complete!")
+                    return True
 
     def _render_calibration_boundary(self) -> NDArray[np.uint8]:
         size = 600
