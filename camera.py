@@ -6,8 +6,8 @@ from numpy.typing import NDArray
 import cv2
 from typing import Optional
 
-ROWS = 30
-COLS = 50
+ROWS = 40
+COLS = 60
 SQUARE_SIZE = 20
 PADDING = 25
 
