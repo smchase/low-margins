@@ -80,10 +80,8 @@ def tensors_to_frames(tensors: List[torch.Tensor]) -> List[Frame]:
         if tensor is not None:
             # Detach if tensor requires grad
             t = tensor.detach() if tensor.requires_grad else tensor
-            # Convert bfloat16 to float32 first, then to float16
-            if t.dtype == torch.bfloat16:
-                t = t.float()  # bfloat16 -> float32
-            flat_values.extend(t.cpu().numpy().flatten().astype(np.float16))
+            # Convert to float16 for encoding
+            flat_values.extend(t.cpu().to(torch.float16).numpy().flatten())
     
     total_floats = len(flat_values)
     num_frames = (total_floats + FLOATS_PER_FRAME - 1) // FLOATS_PER_FRAME
@@ -175,10 +173,8 @@ def frames_to_tensors(frames: List[Frame], tensor_shapes: List[Tuple], target_dt
         num_elements = np.prod(shape)
         if value_idx + num_elements <= len(all_values):
             tensor_values = all_values[value_idx:value_idx + num_elements]
-            # First create as float32, then convert to target dtype
-            tensor = torch.tensor(tensor_values, dtype=torch.float32).reshape(shape)
-            if target_dtype != torch.float32:
-                tensor = tensor.to(target_dtype)
+            # Create tensor directly in target dtype
+            tensor = torch.tensor(tensor_values, dtype=target_dtype).reshape(shape)
             tensors.append(tensor)
             value_idx += num_elements
         else:
