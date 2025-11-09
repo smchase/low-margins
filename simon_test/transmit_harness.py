@@ -28,7 +28,7 @@ if __name__ == "__main__":
     print(f"\nLoaded {len(test_cases)} test cases")
     print(f"Frame rate: {1/SECONDS_PER_FRAME:.2f} fps ({SECONDS_PER_FRAME}s per frame)")
     print("\n" + "="*60)
-    print("Press SPACE to start transmission (will sync to even second)")
+    print("Press SPACE to start transmission (will sync to 5-second boundary)")
     print("="*60)
 
     while True:
@@ -37,22 +37,22 @@ if __name__ == "__main__":
         if key == ord(' '):
             break
 
-    # Wait for the next even second boundary
-    # If we're currently at an even second, wait for it to pass first
-    if int(time.time()) % 2 == 0:
+    # Wait for the next 5-second boundary
+    # If we're currently at a 5-second boundary, wait for it to pass first
+    if int(time.time()) % 5 == 0:
         current = int(time.time())
         while int(time.time()) == current:
             cam.update()
             cv2.waitKey(30)
 
-    # Now wait for the next even second
-    while int(time.time()) % 2 == 1:
+    # Now wait for the next 5-second boundary
+    while int(time.time()) % 5 != 0:
         cam.update()
         cv2.waitKey(30)
 
-    # We're at an even second boundary - record start time
+    # We're at a 5-second boundary - record start time
     start_time = time.time()
-    print(f"GO! Starting transmission at t={start_time:.3f}")
+    print(f"GO! Starting transmission at t={start_time:.3f} (unix second {int(start_time)})")
 
     frame_number = 0
 
