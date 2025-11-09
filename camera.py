@@ -267,12 +267,16 @@ class Camera:
 
                 if rx_frames_stable == 3:  # STABILIZATION_FRAMES
                     self.calibrated_colors[:, :, rx_color_idx, :] = curr_samples
-                    print(f"  ✓ Captured color {rx_color_idx}")
+                    # Debug: show what color was captured
+                    avg_color = np.mean(curr_samples, axis=(0, 1)).astype(np.uint8)
+                    color_name = ["White", "Red", "Green", "Blue", "Yellow", "Magenta", "Cyan"][rx_color_idx] if rx_color_idx < 7 else "Unknown"
+                    print(f"  ✓ Captured color {rx_color_idx} ({color_name}): BGR={avg_color}")
                     rx_color_idx += 1
                     rx_frames_stable = -1000
 
                     if rx_color_idx >= 7:
                         print("✓ Receive calibration complete!")
+                        print(f"  Total colors captured: {len(COLOR_MAP)}")
                         self.receive_calibration_done = True
                         rx_state = "idle"
                         # Back to instructions
@@ -615,7 +619,7 @@ class Camera:
             self,
             previous_samples: NDArray[np.float32],
             current_samples: NDArray[np.float32],
-            threshold: int = 200) -> bool:
+            threshold: int = 400) -> bool:
         """Detects if a major color change occurred across the grid.
         Returns True if more than 'threshold' squares changed significantly."""
         if previous_samples is None:
