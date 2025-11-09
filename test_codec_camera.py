@@ -5,7 +5,7 @@ Workflow:
 1. Both computers: Complete calibration (T to transmit, R to receive)
 2. Sender: Press S for send mode
    - Shows GREEN start signal for 5 seconds
-   - Sends encoded grids at 2fps (one pass only)
+   - Sends encoded grids at 4fps (one pass only)
    - Shows GREEN end signal when done
    - Press S again to restart transmission
 3. Receiver: Press R for receive mode, then SPACE to start
@@ -16,9 +16,12 @@ Workflow:
    - Decodes and compares with expected tensor
    - Shows diff report (perfect match or error details)
    - Press SPACE again to restart collection
+   - Use +/- to adjust camera shutter speed (exposure)
+   - Press 0 for auto exposure
 
 Note: Both TX and RX use the same hardcoded tensor (seed=42) for verification.
 Grid size: 32x32 pixels
+At 4fps, fast shutter speed may be needed to avoid motion blur
 """
 import numpy as np
 import cv2
@@ -104,15 +107,15 @@ def test_send_receive():
 
 def send_mode(cam: Camera, grids: np.ndarray):
     """
-    Sender: Display frames at 2fps.
+    Sender: Display frames at 4fps.
     Sequence: green start signal (5s) -> grid[0] -> grid[1] -> ... -> grid[D-1] -> green end signal (hold)
     Press S to restart transmission.
     """
     print("\n=== SEND MODE ===")
-    print(f"Sending {grids.shape[0]} grids at 2fps (0.5s per frame)")
+    print(f"Sending {grids.shape[0]} grids at 4fps (0.25s per frame)")
     print("Press S to start/restart transmission, Q to quit")
 
-    frame_interval = 0.5  # 2fps = 0.5 seconds per frame
+    frame_interval = 0.25  # 4fps = 0.25 seconds per frame
 
     # State: idle, start_signal, transmitting, end_signal
     state = "idle"
@@ -197,7 +200,19 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
     else:
         print("✓ Using calibrated colors for decoding")
 
-    print("Press SPACE to start waiting for GREEN start signal, Q to quit")
+    print("\nControls:")
+    print("  SPACE - Start/restart collection")
+    print("  + - Decrease shutter speed (faster, less light)")
+    print("  - - Increase shutter speed (slower, more light)")
+    print("  0 - Auto exposure")
+    print("  Q - Quit")
+
+    # Initialize exposure control
+    if not cam.test_mode:
+        current_exposure = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
+        print(f"\nCurrent exposure: {current_exposure}")
+        if current_exposure < 0:
+            print("(Auto exposure enabled)")
 
     collected_grids = []
     prev_frame_data = None
@@ -364,6 +379,28 @@ def receive_mode(cam: Camera, c: codec, expected_tensor: np.ndarray):
                 frames_stable = 0
                 prev_frame_data = None
                 print("\n[WAITING] Looking for GREEN start signal...")
+        elif key == ord('+') or key == ord('='):
+            # Decrease shutter speed (faster shutter, less exposure time)
+            if not cam.test_mode:
+                current = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
+                new_exposure = current - 1
+                cam.cap.set(cv2.CAP_PROP_EXPOSURE, new_exposure)
+                actual = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
+                print(f"\n[EXPOSURE] Decreased: {current} -> {actual} (faster shutter)")
+        elif key == ord('-') or key == ord('_'):
+            # Increase shutter speed (slower shutter, more exposure time)
+            if not cam.test_mode:
+                current = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
+                new_exposure = current + 1
+                cam.cap.set(cv2.CAP_PROP_EXPOSURE, new_exposure)
+                actual = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
+                print(f"\n[EXPOSURE] Increased: {current} -> {actual} (slower shutter)")
+        elif key == ord('0'):
+            # Set auto exposure
+            if not cam.test_mode:
+                cam.cap.set(cv2.CAP_PROP_EXPOSURE, -1)
+                actual = cam.cap.get(cv2.CAP_PROP_EXPOSURE)
+                print(f"\n[EXPOSURE] Set to auto: {actual}")
 
 
 if __name__ == "__main__":
