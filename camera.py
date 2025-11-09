@@ -27,7 +27,8 @@ class Frame:
 class Camera:
     def __init__(self, test_mode: bool = False) -> None:
         self.test_mode = test_mode
-        self.warp_size = 600
+        self.display_size = 1552  # Display and webcam size
+        self.warp_size = 1552
         self.locked_corners: Optional[NDArray[np.float32]] = None
         self.warp_matrix: Optional[NDArray[np.float32]] = None
         self.test_camera_input: Optional[NDArray[np.uint8]] = None
@@ -45,8 +46,8 @@ class Camera:
             self.cap = cv2.VideoCapture(0)
             if not self.cap.isOpened():
                 raise RuntimeError("Could not open camera")
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1552)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1552)
             print(
                 f"Camera resolution: "
                 f"{int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
@@ -82,13 +83,14 @@ class Camera:
 
     def _render_instructions(self, in_data_mode: bool = False) -> NDArray[np.uint8]:
         """Renders the instructions screen"""
-        img = np.ones((800, 1000, 3), dtype=np.uint8) * 255
+        size = self.display_size
+        img = np.ones((size, size, 3), dtype=np.uint8) * 255
 
         # Title
         cv2.putText(img, "CAMERA DATA LINK",
-                   (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 3)
+                   (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.8, (0, 0, 0), 3)
 
-        y = 150
+        y = 220
 
         if not in_data_mode:
             # Calibration mode
@@ -96,43 +98,43 @@ class Camera:
             check_tx = "✓" if self.transmit_calibration_done else "☐"
 
             cv2.putText(img, "CALIBRATION STATUS:",
-                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
-            y += 60
-            cv2.putText(img, f"{check_rx} Receive Calibration",
-                       (80, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
-            y += 50
-            cv2.putText(img, f"{check_tx} Transmit Calibration",
-                       (80, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
+                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
             y += 80
+            cv2.putText(img, f"{check_rx} Receive Calibration",
+                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
+            y += 70
+            cv2.putText(img, f"{check_tx} Transmit Calibration",
+                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
+            y += 100
 
             cv2.putText(img, "KEYBOARD CONTROLS:",
-                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
-            y += 60
+                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
+            y += 80
             cv2.putText(img, "T - Transmit calibration",
-                       (80, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-            y += 50
+                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
+            y += 60
             cv2.putText(img, "R - Receive calibration",
-                       (80, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-            y += 50
+                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
+            y += 60
             cv2.putText(img, "Q - Quit",
-                       (80, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
         else:
             # Data transmission mode
             cv2.putText(img, "DATA TRANSMISSION MODE",
-                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 150, 0), 2)
-            y += 80
+                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 150, 0), 2)
+            y += 100
 
             cv2.putText(img, "KEYBOARD CONTROLS:",
-                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
-            y += 60
+                       (50, y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
+            y += 80
             cv2.putText(img, "S - Send random data",
-                       (80, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-            y += 50
+                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
+            y += 60
             cv2.putText(img, "D - Decode/receive data",
-                       (80, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-            y += 50
+                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
+            y += 60
             cv2.putText(img, "Q - Quit",
-                       (80, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+                       (100, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2)
 
         return img
 
@@ -143,20 +145,17 @@ class Camera:
             in_data_mode = self.receive_calibration_done and self.transmit_calibration_done
             return self._render_instructions(in_data_mode)
         elif self.display_mode == "transmit_markers":
-            pattern = self._render_calibration_boundary()
-            return cv2.resize(pattern, (1000, 800))
+            return self._render_calibration_boundary()
         elif self.display_mode == "transmit_colors":
             if hasattr(self, '_transmit_color_idx'):
-                pattern = self._render_color_calibration_pattern(self._transmit_color_idx)
-                return cv2.resize(pattern, (1000, 800))
+                return self._render_color_calibration_pattern(self._transmit_color_idx)
             return self._render_instructions()
         elif self.display_mode == "receive_camera":
-            # Show camera feed full screen
-            return cv2.resize(webcam_frame, (1000, 800))
+            # Show camera feed - already 1000x1000
+            return webcam_frame
         elif self.display_mode == "send_data":
             if self.display_data is not None:
-                pattern = self._render_data(self.display_data)
-                return cv2.resize(pattern, (1000, 800))
+                return self._render_data(self.display_data)
             return self._render_instructions(True)
         else:
             return self._render_instructions()
@@ -181,13 +180,13 @@ class Camera:
             # Get webcam frame
             if self.test_mode:
                 if self.test_camera_input is None:
-                    webcam_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    webcam_frame = np.zeros((self.display_size, self.display_size, 3), dtype=np.uint8)
                 else:
                     webcam_frame = self.test_camera_input
             else:
                 ret, webcam_frame = self.cap.read()
                 if not ret:
-                    webcam_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    webcam_frame = np.zeros((self.display_size, self.display_size, 3), dtype=np.uint8)
 
             # Handle transmit calibration timing
             if self.display_mode == "transmit_markers":
@@ -287,9 +286,9 @@ class Camera:
                     print("Already completed receive calibration")
 
     def _render_calibration_boundary(self) -> NDArray[np.uint8]:
-        size = 600
-        marker_size = 100
-        padding = 50
+        size = self.display_size
+        marker_size = int(size * 0.15)  # 15% of display size
+        padding = int(size * 0.1)  # 10% padding
         img = np.ones((size, size, 3), dtype=np.uint8) * 255
         aruco_dict = cv2.aruco.getPredefinedDictionary(
             cv2.aruco.DICT_4X4_50)
@@ -385,11 +384,11 @@ class Camera:
     def _render_color_calibration_pattern(
             self, color_idx: int) -> NDArray[np.uint8]:
         """Renders a full grid with all cells showing the same color."""
-        size = 600
+        size = self.display_size
         img = np.ones((size, size, 3), dtype=np.uint8) * 255
 
-        data_start = 50
-        data_size = 500
+        data_start = int(size * 0.1)  # 10% padding
+        data_size = int(size * 0.8)  # 80% for data
 
         color = COLOR_MAP[color_idx]
         img[data_start:data_start+data_size,
@@ -494,11 +493,11 @@ class Camera:
         cv2.imshow('Transmitter: Data', self._render_data(frame))
 
     def _render_data(self, frame: Frame) -> NDArray[np.uint8]:
-        size = 600
+        size = self.display_size
         img = np.ones((size, size, 3), dtype=np.uint8) * 255
 
-        data_start = 50
-        data_size = 500
+        data_start = int(size * 0.1)  # 10% padding
+        data_size = int(size * 0.8)  # 80% for data
 
         cell_size = data_size / WIDTH
         for row in range(HEIGHT):
@@ -583,7 +582,7 @@ if __name__ == "__main__":
         # Get webcam frame
         ret, webcam_frame = cam.cap.read()
         if not ret:
-            webcam_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            webcam_frame = np.zeros((cam.display_size, cam.display_size, 3), dtype=np.uint8)
 
         # Render and display
         display = cam._render_window(webcam_frame)
