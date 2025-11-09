@@ -17,8 +17,8 @@ WINDOW_WIDTH = DATA_WIDTH + 2 * PADDING
 WINDOW_HEIGHT = DATA_HEIGHT + 2 * PADDING
 
 COLORS = [
-    (0, 0, 0),
-    (255, 255, 255),
+    (255, 0, 0),
+    (0, 255, 255),
 ]
 SECONDS_PER_FRAME = 1
 
@@ -143,9 +143,6 @@ class Camera:
 
                         if receiving_color_index >= len(COLORS):
                             print("✓ Receive calibration complete!")
-                            print(f"DEBUG: Calibrated color 0 avg brightness: {np.mean(self.calibrated_colors[:, :, 0, :]):.2f}")
-                            print(f"DEBUG: Calibrated color 1 avg brightness: {np.mean(self.calibrated_colors[:, :, 1, :]):.2f}")
-                            print(f"DEBUG: Expected COLORS[0]={(0,0,0)} (BLACK), COLORS[1]={(255,255,255)} (WHITE)")
                             receive_calibration_done = True
                             state = CalibrationState.INSTRUCTIONS
 
@@ -282,8 +279,6 @@ class Camera:
 
     def transmit(self, frame: Frame) -> None:
         self.curent_transmission = frame
-        # Debug: print first few pixels being transmitted
-        print(f"DEBUG TRANSMIT: data[0,0]={frame.data[0,0]} -> COLORS[{frame.data[0,0]}]={COLORS[frame.data[0,0]]}")
 
     def receive(self) -> Frame:
         ret, frame = self.cap.read()
@@ -310,9 +305,5 @@ class Camera:
                         best_color_index = i
 
                 data[row, col] = best_color_index
-
-        # Debug: print what we received for first pixel
-        print(f"DEBUG RECEIVE: data[0,0]={data[0,0]}, pixel BGR={unwarped[int(0.5*SQUARE_SIZE), int(0.5*SQUARE_SIZE)]}, "
-              f"calibrated[0,0,0]={self.calibrated_colors[0,0,0]}, calibrated[0,0,1]={self.calibrated_colors[0,0,1]}")
 
         return Frame(data=data)
