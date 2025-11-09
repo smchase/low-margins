@@ -63,6 +63,30 @@ class TensorLink:
         print(f"✗ Timeout waiting for sync signal")
         return False
     
+    def _wait_for_sync_end(self, pattern_value: int, timeout_sec: int = 10) -> bool:
+        """Wait for sync frame to disappear (transition away from pattern). Returns True if transitioned."""
+        print(f"Waiting for sync signal to end (pattern={pattern_value})...")
+        start_time = time.time()
+        
+        while (time.time() - start_time) < timeout_sec:
+            frame = self.camera.receive()
+            
+            # Check if frame is NOT the sync pattern anymore
+            matches = np.sum(frame.data == pattern_value)
+            total_cells = frame.data.size
+            
+            # If <50% of cells match, sync has ended
+            if matches < (0.5 * total_cells):
+                print(f"✓ Sync signal ended, ready for data!")
+                return True
+            
+            # Update display to keep responsive
+            self.camera.update()
+            time.sleep(0.03)
+        
+        print(f"✗ Timeout waiting for sync to end")
+        return False
+    
     def send_tensor(self, tensor: torch.Tensor) -> None:
         if len(tensor.shape) != 2:
             raise ValueError(f"Tensor must be 2D, got shape {tensor.shape}")
@@ -170,33 +194,88 @@ class TensorLink:
         if not self._wait_for_sync_frame(self.START_PATTERN, timeout_sec=timeout_sec):
             raise TimeoutError("Failed to receive START signal")
         
-        time.sleep(0.3)  # Brief pause after detecting START
+        # CRITICAL: Wait for START signal to END (transition away)
+        # This ensures sender has stopped sending START and is ready to send data
+        if not self._wait_for_sync_end(self.START_PATTERN, timeout_sec=5):
+            raise TimeoutError("START signal never ended")
         
-        # Padded dimensions
+        time.sleep(0.2)  # Brief pause after START ends, before reading data
+        
+        # STEP 1: Capture ALL frames until END signal
+        print("Capturing all frames until END signal...")
+        all_frames = []
+        capture_start = time.time()
+        
+        while True:
+            frame = self.camera.receive()
+            
+            # Check if this is END signal
+            matches = np.sum(frame.data == self.END_PATTERN)
+            total_cells = frame.data.size
+            
+            if matches > (0.9 * total_cells):
+                print(f"✓ END signal detected after {len(all_frames)} captures!")
+                break
+            
+            # Store frame
+            all_frames.append(frame.data.copy())
+            
+            # Timeout check (safety)
+            if (time.time() - capture_start) > 300:  # 5 min timeout
+                raise TimeoutError("Timeout waiting for END signal")
+            
+            # Brief delay between captures
+            time.sleep(0.01)
+            self.camera.update()
+        
+        print(f"Captured {len(all_frames)} total frames")
+        
+        # STEP 2: Deduplicate consecutive identical frames
+        print("Deduplicating consecutive frames...")
+        unique_frames = []
+        prev = None
+        
+        for frame in all_frames:
+            if prev is None:
+                # First frame
+                unique_frames.append(frame)
+                prev = frame
+            else:
+                # Check if different from previous
+                if not np.array_equal(frame, prev):
+                    unique_frames.append(frame)
+                    prev = frame
+                # else: skip duplicate
+        
+        print(f"Deduplicated to {len(unique_frames)} unique frames")
+        
+        # STEP 3: Verify we have the right number of frames
+        if len(unique_frames) != total_frames:
+            print(f"⚠ Warning: Expected {total_frames} frames, got {len(unique_frames)}")
+            print(f"  This might cause decoding errors!")
+        
+        # STEP 4: Process frames into tiles
+        print("Decoding frames into tensor...")
         padded_rows = tiles_rows * self.tile_size
         padded_cols = tiles_cols * self.tile_size
-        
-        # Reconstruct tensor from tiles
         reconstructed = np.zeros((padded_rows, padded_cols), dtype=np.float16)
         
-        frame_count = 0
-        
+        frame_idx = 0
         for tile_row in range(tiles_rows):
             for tile_col in range(tiles_cols):
-                # Receive frames for this tile
+                # Collect frames for this tile
                 received_grids = []
                 for i in range(frames_per_tile):
-                    frame = self.camera.receive()
+                    if frame_idx >= len(unique_frames):
+                        raise ValueError(f"Ran out of frames! Expected {total_frames}, got {len(unique_frames)}")
+                    
+                    frame_data = unique_frames[frame_idx]
                     
                     # Threshold to binary: 0-3 → 0, 4-7 → 1
-                    # This handles noise and ensures values are in codec range [0, 1]
-                    binary_data = (frame.data >= 4).astype(np.int64)
+                    binary_data = (frame_data >= 4).astype(np.int64)
                     received_grids.append(binary_data)
                     
-                    frame_count += 1
-                    
-                    if frame_count % 10 == 0 or frame_count == total_frames:
-                        print(f"  Received frame {frame_count}/{total_frames}")
+                    frame_idx += 1
                 
                 # Decode tile
                 grids_array = np.array(received_grids)
@@ -209,6 +288,9 @@ class TensorLink:
                 c_end = c_start + self.tile_size
                 
                 reconstructed[r_start:r_end, c_start:c_end] = tile
+                
+                if (tile_row * tiles_cols + tile_col + 1) % 5 == 0:
+                    print(f"  Decoded tile {tile_row * tiles_cols + tile_col + 1}/{total_tiles}")
         
         # Crop to original size
         tensor_np = reconstructed[:rows, :cols]
@@ -222,13 +304,6 @@ class TensorLink:
             tensor = torch.from_numpy(tensor_np)
             if dtype != torch.float16:
                 tensor = tensor.to(dtype)
-        
-        # HANDSHAKE: Wait for END signal (optional, for confirmation)
-        print("Waiting for END signal...")
-        if self._wait_for_sync_frame(self.END_PATTERN, timeout_sec=10):
-            print("✓ END signal confirmed")
-        else:
-            print("⚠ END signal not detected (might be ok)")
         
         print("✓ Tensor reception complete!")
         return tensor
