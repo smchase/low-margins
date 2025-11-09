@@ -1,11 +1,11 @@
 import sys
 import time
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from camera import Frame, ROWS, COLS, SECONDS_PER_FRAME  # noqa: E402
+from camera import Frame, ROWS, COLS  # noqa: E402
 from codec import codec  # noqa: E402
 
 # Protocol constants
@@ -109,9 +109,6 @@ def tensor_to_frames(tensor: np.ndarray) -> List[Frame]:
         raise ValueError(f"Expected dtype float16, got {tensor.dtype}")
     
     frames = []
-    
-    # Create codec for encoding float16 values
-    frame_codec = codec(ROWS, COLS, CODEC_MIN_VAL, CODEC_MAX_VAL)
     
     # Calculate how many float16 values we can fit per frame
     # Each float16 needs GRIDS_PER_FLOAT16 grids, each grid is ROWS x COLS
@@ -280,3 +277,84 @@ def get_cycle_timing_stats() -> dict:
         "seconds_remaining": seconds_remain,
         "cycle_position": current_time % CYCLE_TIME
     }
+
+
+def compute_tensor_checksum(tensor: np.ndarray) -> int:
+    """
+    Compute a deterministic checksum for a tensor.
+    Uses the raw bytes of the float16 values.
+    
+    Args:
+        tensor: Float16 numpy array
+        
+    Returns:
+        Integer checksum
+    """
+    # Convert to uint16 view to get raw bits
+    as_u16 = tensor.view(np.uint16)
+    # Simple but effective checksum: sum of all bits XOR'd with positions
+    checksum = 0
+    for i, val in enumerate(as_u16.flat):
+        checksum ^= (int(val) * (i + 1))
+    return checksum & 0xFFFFFFFF  # Keep as 32-bit
+
+
+def verify_tensor_bitwise(original: np.ndarray, received: np.ndarray) -> Tuple[bool, int, str]:
+    """
+    Verify two tensors are bit-exact matches (for float16).
+    
+    Args:
+        original: Original tensor (float16)
+        received: Received tensor (float16)
+        
+    Returns:
+        Tuple of (matches, num_bit_differences, details_string)
+    """
+    if original.shape != received.shape:
+        return False, -1, f"Shape mismatch: {original.shape} vs {received.shape}"
+    
+    if original.dtype != np.float16 or received.dtype != np.float16:
+        return False, -1, f"Dtype mismatch: {original.dtype} vs {received.dtype}"
+    
+    # Compare as uint16 for bit-exact comparison
+    orig_u16 = original.view(np.uint16)
+    recv_u16 = received.view(np.uint16)
+    
+    diff_mask = orig_u16 != recv_u16
+    num_diff = np.sum(diff_mask)
+    
+    if num_diff == 0:
+        orig_checksum = compute_tensor_checksum(original)
+        return True, 0, f"Perfect match! Checksum: 0x{orig_checksum:08X}"
+    
+    # Find how many bits differ in total
+    xor_vals = orig_u16[diff_mask] ^ recv_u16[diff_mask]
+    total_bit_flips = sum(bin(int(x)).count('1') for x in xor_vals)
+    
+    details = f"{num_diff} values differ ({num_diff/len(orig_u16.flat)*100:.2f}%), {total_bit_flips} total bit flips"
+    return False, int(num_diff), details
+
+
+def log_tensor_details(tensor: np.ndarray, label: str) -> List[str]:
+    """
+    Generate detailed logging information about a tensor.
+    
+    Args:
+        tensor: Tensor to log
+        label: Label for this tensor
+        
+    Returns:
+        List of log strings
+    """
+    lines = []
+    lines.append(f"{label}:")
+    lines.append(f"  Shape: {tensor.shape}, dtype: {tensor.dtype}")
+    lines.append(f"  Stats: min={np.min(tensor):.6f}, max={np.max(tensor):.6f}, mean={np.mean(tensor):.6f}, std={np.std(tensor):.6f}")
+    lines.append(f"  Checksum: 0x{compute_tensor_checksum(tensor):08X}")
+    
+    # Show first few values
+    flat = tensor.flat
+    preview = [f"{flat[i]:.6f}" for i in range(min(5, len(flat)))]
+    lines.append(f"  First values: [{', '.join(preview)}...]")
+    
+    return lines

@@ -6,11 +6,12 @@ import numpy as np
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from camera import Camera, Frame, ROWS, COLS, SECONDS_PER_FRAME  # noqa: E402
+from camera import Camera, ROWS, COLS, SECONDS_PER_FRAME  # noqa: E402
 from test_utils import (  # noqa: E402
     PhaseType, get_current_phase_info, wait_for_phase,
     generate_test_tensor, tensor_to_frames, frames_to_tensor,
     verify_tensor_integrity, apply_test_transform, get_cycle_timing_stats,
+    compute_tensor_checksum, verify_tensor_bitwise,
     CYCLE_TIME, FRAMES_PER_TENSOR
 )
 
@@ -87,8 +88,10 @@ def main():
         # overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | {phase_name} | {timing_stats['seconds_remaining']:.1f}s"
         # cam.set_overlay_text(overlay_text)
         
-        # Calculate what we expect to receive from root
+        # Calculate what we expect to receive from root (DETERMINISTIC)
         expected_from_root = generate_test_tensor(ROOT_SEED, cycle_number)
+        expected_from_root_checksum = compute_tensor_checksum(expected_from_root)
+        log_status(f"Expected tensor from root - Checksum: 0x{expected_from_root_checksum:08X}", timing_stats)
         
         # Phase 1: Root compute (we just wait)
         wait_for_phase(PhaseType.COMPUTE_ROOT)
@@ -98,7 +101,7 @@ def main():
         log_status("Root computing...", timing_stats)
         
         # Phase 2: Receive from root
-        phase_start = wait_for_phase(PhaseType.TRANSMIT_ROOT_TO_WORKER)
+        phase_start_time = wait_for_phase(PhaseType.TRANSMIT_ROOT_TO_WORKER)
         timing_stats = get_cycle_timing_stats()
         # overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Receive from Root | {timing_stats['seconds_remaining']:.1f}s"
         # cam.set_overlay_text(overlay_text)
@@ -106,7 +109,6 @@ def main():
         
         received_frames = []
         frame_idx = 0
-        phase_start_time = time.time()
         pixel_errors = []
         
         while frame_idx < FRAMES_PER_TENSOR:
@@ -150,30 +152,52 @@ def main():
         if reception_complete:
             try:
                 received_tensor = frames_to_tensor(received_frames)
-                log_status(f"Successfully received and decoded tensor", timing_stats)
+                received_checksum = compute_tensor_checksum(received_tensor)
                 
-                # REAL VERIFICATION: Check if we received what root should have sent
-                matches, num_diff, max_error = verify_tensor_integrity(expected_from_root, received_tensor)
+                log_status(f"Successfully received and decoded tensor", timing_stats)
+                log_status(f"Received tensor checksum: 0x{received_checksum:08X}", timing_stats)
+                
+                # BIT-EXACT VERIFICATION: Check if we received what root should have sent
+                bitwise_match, num_diff, details = verify_tensor_bitwise(expected_from_root, received_tensor)
+                
+                # Also do float comparison for backward compatibility
+                float_matches, float_num_diff, float_max_error = verify_tensor_integrity(expected_from_root, received_tensor)
                 
                 tensor_integrity_results.append({
                     'cycle': cycle_count,
-                    'matches': matches,
+                    'matches': bitwise_match,
                     'num_diff': num_diff,
-                    'max_error': max_error
+                    'max_error': float_max_error if not bitwise_match else 0.0
                 })
                 
-                if matches:
+                if bitwise_match:
                     validation_passed = True
                     successful_validations += 1
-                    log_status(f"✓ Reception VALIDATED: Received exact tensor from root!", timing_stats)
+                    log_status(f"✓ Reception VALIDATED (BIT-EXACT): {details}", timing_stats)
+                    log_status(f"  Checksums match: 0x{expected_from_root_checksum:08X} == 0x{received_checksum:08X}")
                 else:
-                    log_status(f"✗ Reception VALIDATION FAILED: {num_diff} values differ, max error: {max_error}", timing_stats)
+                    log_status(f"✗ Reception VALIDATION FAILED (BIT-LEVEL): {details}", timing_stats)
+                    log_status(f"  Expected checksum: 0x{expected_from_root_checksum:08X}")
+                    log_status(f"  Received checksum: 0x{received_checksum:08X}")
+                    
                     # Show some examples of mismatches
                     if num_diff > 0 and num_diff < 100:
-                        diffs = np.where(expected_from_root != received_tensor)[0]
-                        for i in range(min(3, len(diffs))):
-                            idx = diffs[i]
-                            log_status(f"    Index {idx}: expected {expected_from_root[idx]:.6f}, got {received_tensor[idx]:.6f}")
+                        expected_u16 = expected_from_root.view(np.uint16)
+                        received_u16 = received_tensor.view(np.uint16)
+                        diff_mask = expected_u16 != received_u16
+                        diff_indices = np.where(diff_mask)[0]
+                        
+                        for i in range(min(5, len(diff_indices))):
+                            idx = diff_indices[i]
+                            exp_bits = expected_u16[idx]
+                            rec_bits = received_u16[idx]
+                            exp_float = expected_from_root.flat[idx]
+                            rec_float = received_tensor.flat[idx]
+                            xor = exp_bits ^ rec_bits
+                            bit_flips = bin(xor).count('1')
+                            log_status(f"    [{idx}] Expected: {exp_float:.6f} (0x{exp_bits:04X}) | "
+                                      f"Got: {rec_float:.6f} (0x{rec_bits:04X}) | "
+                                      f"{bit_flips} bits differ")
                 
                 # Log reception quality
                 total_pixel_errors = sum(pixel_errors)
@@ -204,13 +228,15 @@ def main():
         log_status("Computing response...", timing_stats)
         
         if received_tensor is not None and validation_passed:
-            # Apply transformation only if we received valid data
+            # Apply transformation only if we received valid data (DETERMINISTIC)
             response_tensor = apply_test_transform(received_tensor, TRANSFORM_TYPE)
             frames_to_send = tensor_to_frames(response_tensor)
+            response_checksum = compute_tensor_checksum(response_tensor)
             
             log_status(f"Applied '{TRANSFORM_TYPE}' transform", timing_stats)
-            log_status(f"Response tensor stats: min={np.min(response_tensor):.3f}, "
-                      f"max={np.max(response_tensor):.3f}, mean={np.mean(response_tensor):.3f}")
+            log_status(f"Response tensor stats: min={np.min(response_tensor):.6f}, "
+                      f"max={np.max(response_tensor):.6f}, mean={np.mean(response_tensor):.6f}")
+            log_status(f"Response checksum: 0x{response_checksum:08X}")
         else:
             # If we didn't receive properly, generate a dummy response
             log_status("Generating dummy response due to reception failure or validation error", timing_stats)
@@ -218,14 +244,13 @@ def main():
             frames_to_send = tensor_to_frames(response_tensor)
         
         # Phase 4: Transmit to root
-        phase_start = wait_for_phase(PhaseType.TRANSMIT_WORKER_TO_ROOT)
+        phase_start_time = wait_for_phase(PhaseType.TRANSMIT_WORKER_TO_ROOT)
         timing_stats = get_cycle_timing_stats()
         # overlay_text = f"WORKER | Cycle {cycle_count+1}/{TARGET_CYCLES} | Transmit to Root | {timing_stats['seconds_remaining']:.1f}s"
         # cam.set_overlay_text(overlay_text)
         log_status(f"Transmitting {FRAMES_PER_TENSOR} frames to root", timing_stats)
         
         frame_idx = 0
-        phase_start_time = time.time()
         
         while frame_idx < FRAMES_PER_TENSOR:
             cam.update()

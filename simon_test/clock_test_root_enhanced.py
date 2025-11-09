@@ -6,11 +6,12 @@ import numpy as np
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from camera import Camera, Frame, ROWS, COLS, SECONDS_PER_FRAME  # noqa: E402
+from camera import Camera, SECONDS_PER_FRAME  # noqa: E402
 from test_utils import (  # noqa: E402
     PhaseType, get_current_phase_info, wait_for_phase,
     generate_test_tensor, tensor_to_frames, frames_to_tensor,
     verify_tensor_integrity, apply_test_transform, get_cycle_timing_stats,
+    compute_tensor_checksum, verify_tensor_bitwise,
     CYCLE_TIME, FRAMES_PER_TENSOR
 )
 
@@ -94,19 +95,25 @@ def main():
         timing_error = phase_start - (cycle_number * CYCLE_TIME + start_time % CYCLE_TIME)
         phase_timing_errors.append(("compute_root", timing_error))
         
-        # Generate the test tensor for this cycle
+        # Generate the test tensor for this cycle (DETERMINISTIC)
         test_tensor = generate_test_tensor(ROOT_SEED, cycle_number)
         frames_to_send = tensor_to_frames(test_tensor)
-        log_status(f"Generated test tensor for cycle {cycle_number}", timing_stats)
-        log_status(f"  Tensor stats: shape={test_tensor.shape}, min={np.min(test_tensor):.3f}, "
-                  f"max={np.max(test_tensor):.3f}, mean={np.mean(test_tensor):.3f}")
+        sent_checksum = compute_tensor_checksum(test_tensor)
         
-        # Calculate what we expect to receive back
+        log_status(f"Generated test tensor for cycle {cycle_number}", timing_stats)
+        log_status(f"  Shape: {test_tensor.shape}, dtype: {test_tensor.dtype}")
+        log_status(f"  Stats: min={np.min(test_tensor):.6f}, max={np.max(test_tensor):.6f}, "
+                  f"mean={np.mean(test_tensor):.6f}, std={np.std(test_tensor):.6f}")
+        log_status(f"  Checksum: 0x{sent_checksum:08X}")
+        
+        # Calculate what we expect to receive back (DETERMINISTIC)
         expected_response = apply_test_transform(test_tensor, EXPECTED_TRANSFORM)
+        expected_response_checksum = compute_tensor_checksum(expected_response)
+        log_status(f"  Expected response checksum: 0x{expected_response_checksum:08X}")
         
         # Phase 2: Transmit to worker
-        phase_start = wait_for_phase(PhaseType.TRANSMIT_ROOT_TO_WORKER)
-        timing_error = phase_start - (cycle_number * CYCLE_TIME + 0.5 + start_time % CYCLE_TIME)
+        phase_start_time = wait_for_phase(PhaseType.TRANSMIT_ROOT_TO_WORKER)
+        timing_error = phase_start_time - (cycle_number * CYCLE_TIME + 0.5 + start_time % CYCLE_TIME)
         phase_timing_errors.append(("transmit_to_worker", timing_error))
         
         # Update overlay for transmit phase (disabled)
@@ -117,7 +124,6 @@ def main():
         log_status(f"Transmitting {FRAMES_PER_TENSOR} frames to worker", timing_stats)
         
         frame_idx = 0
-        phase_start_time = time.time()
         
         while frame_idx < FRAMES_PER_TENSOR:
             cam.update()
@@ -155,8 +161,8 @@ def main():
         log_status("Worker computing...", timing_stats)
         
         # Phase 4: Receive from worker
-        phase_start = wait_for_phase(PhaseType.TRANSMIT_WORKER_TO_ROOT)
-        timing_error = phase_start - (cycle_number * CYCLE_TIME + 6.0 + start_time % CYCLE_TIME)
+        phase_start_time = wait_for_phase(PhaseType.TRANSMIT_WORKER_TO_ROOT)
+        timing_error = phase_start_time - (cycle_number * CYCLE_TIME + 6.0 + start_time % CYCLE_TIME)
         phase_timing_errors.append(("receive_from_worker", timing_error))
         
         # Update overlay for receive phase (disabled)
@@ -168,7 +174,6 @@ def main():
         
         received_frames = []
         frame_idx = 0
-        phase_start_time = time.time()
         
         while frame_idx < FRAMES_PER_TENSOR:
             cam.update()
@@ -204,35 +209,56 @@ def main():
             
             try:
                 received_tensor = frames_to_tensor(received_frames)
+                received_checksum = compute_tensor_checksum(received_tensor)
                 
-                # REAL VERIFICATION: Check if received tensor matches expected transformation
-                matches, num_diff, max_error = verify_tensor_integrity(expected_response, received_tensor)
+                log_status(f"Received tensor checksum: 0x{received_checksum:08X}", get_cycle_timing_stats())
+                
+                # BIT-EXACT VERIFICATION: Check if received tensor matches expected transformation
+                bitwise_match, num_diff, details = verify_tensor_bitwise(expected_response, received_tensor)
+                
+                # Also do float comparison for backward compatibility
+                float_matches, float_num_diff, float_max_error = verify_tensor_integrity(expected_response, received_tensor)
                 
                 tensor_integrity_results.append({
                     'cycle': cycle_count,
-                    'matches': matches,
+                    'matches': bitwise_match,
                     'num_diff': num_diff,
-                    'max_error': max_error
+                    'max_error': float_max_error if not bitwise_match else 0.0
                 })
                 
-                if matches:
-                    validation_passed = True
+                if bitwise_match:
                     successful_validations += 1
-                    log_status(f"✓ Cycle {cycle_number} VALIDATED: Received tensor matches expected transform!", get_cycle_timing_stats())
+                    log_status(f"✓ Cycle {cycle_number} VALIDATED (BIT-EXACT): {details}", get_cycle_timing_stats())
+                    log_status(f"  Checksums match: 0x{expected_response_checksum:08X} == 0x{received_checksum:08X}")
                 else:
-                    log_status(f"✗ Cycle {cycle_number} VALIDATION FAILED: {num_diff} values differ, max error: {max_error}", get_cycle_timing_stats())
+                    log_status(f"✗ Cycle {cycle_number} VALIDATION FAILED (BIT-LEVEL): {details}", get_cycle_timing_stats())
+                    log_status(f"  Expected checksum: 0x{expected_response_checksum:08X}")
+                    log_status(f"  Received checksum: 0x{received_checksum:08X}")
+                    
                     # Show some examples of mismatches
                     if num_diff > 0 and num_diff < 100:
-                        diffs = np.where(expected_response != received_tensor)[0]
-                        for i in range(min(3, len(diffs))):
-                            idx = diffs[i]
-                            log_status(f"    Index {idx}: expected {expected_response[idx]:.6f}, got {received_tensor[idx]:.6f}")
+                        expected_u16 = expected_response.view(np.uint16)
+                        received_u16 = received_tensor.view(np.uint16)
+                        diff_mask = expected_u16 != received_u16
+                        diff_indices = np.where(diff_mask)[0]
+                        
+                        for i in range(min(5, len(diff_indices))):
+                            idx = diff_indices[i]
+                            exp_bits = expected_u16[idx]
+                            rec_bits = received_u16[idx]
+                            exp_float = expected_response.flat[idx]
+                            rec_float = received_tensor.flat[idx]
+                            xor = exp_bits ^ rec_bits
+                            bit_flips = bin(xor).count('1')
+                            log_status(f"    [{idx}] Expected: {exp_float:.6f} (0x{exp_bits:04X}) | "
+                                      f"Got: {rec_float:.6f} (0x{rec_bits:04X}) | "
+                                      f"{bit_flips} bits differ")
                 
                 # Log tensor statistics
-                log_status(f"  Expected tensor stats: min={np.min(expected_response):.3f}, "
-                          f"max={np.max(expected_response):.3f}, mean={np.mean(expected_response):.3f}")
-                log_status(f"  Received tensor stats: min={np.min(received_tensor):.3f}, "
-                          f"max={np.max(received_tensor):.3f}, mean={np.mean(received_tensor):.3f}")
+                log_status(f"  Expected: min={np.min(expected_response):.6f}, "
+                          f"max={np.max(expected_response):.6f}, mean={np.mean(expected_response):.6f}")
+                log_status(f"  Received: min={np.min(received_tensor):.6f}, "
+                          f"max={np.max(received_tensor):.6f}, mean={np.mean(received_tensor):.6f}")
                 
             except Exception as e:
                 log_status(f"Cycle {cycle_number} FAILED: Error decoding frames - {str(e)}", get_cycle_timing_stats())
