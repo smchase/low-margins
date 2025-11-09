@@ -110,7 +110,10 @@ class CameraCommunicator:
         
         # Get shapes if not already stored
         if self.param_shapes is None:
-            self.param_shapes = [tuple(g.shape) for g in gradients if g is not None]
+            self.param_shapes = [tuple(g.shape) if g is not None else None for g in gradients]
+            # Also set num_frames for consistency
+            total_params = sum(np.prod(shape) for shape in self.param_shapes if shape is not None)
+            self.num_frames = (total_params + FLOATS_PER_FRAME - 1) // FLOATS_PER_FRAME
         
         # Convert to frames
         frames = tensors_to_frames(gradients)
@@ -134,9 +137,15 @@ class CameraCommunicator:
         if self.num_workers != 1:
             raise NotImplementedError("Camera communication currently supports only 1 worker")
         
-        # Receive from the single worker
+        # If we don't know frame count yet, calculate it from model
         if self.num_frames is None:
-            raise RuntimeError("Must receive parameters first to know frame count")
+            # Get model to determine parameter shapes and frame count
+            from train.model import MLP
+            model = MLP()
+            self.param_shapes = [tuple(p.shape) for p in model.parameters()]
+            total_params = sum(np.prod(shape) for shape in self.param_shapes)
+            self.num_frames = (total_params + FLOATS_PER_FRAME - 1) // FLOATS_PER_FRAME
+            print(f"Root: Detected model has {total_params} parameters, need {self.num_frames} frames")
         
         print(f"Root: Receiving {self.num_frames} gradient frames from worker")
         frames = self._receive_frames(self.num_frames)

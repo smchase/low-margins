@@ -34,6 +34,11 @@ python state_network_camera.py --mode root --comm camera --num-steps 30
 python state_network_camera.py --mode worker --comm camera --num-steps 30
 ```
 
+**Important**: 
+1. Complete calibration on both nodes
+2. Press SPACE on both terminals at approximately the same time
+3. The system will sync to the next COMPUTE_G phase automatically
+
 ## Key Differences
 
 ### Timing
