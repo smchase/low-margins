@@ -24,7 +24,7 @@ from config import (
 class Receiver:
     """Receives and decodes grid patterns"""
 
-    def __init__(self, grid_size=16):
+    def __init__(self, grid_size=16, brightness_adjust=0):
         self.grid_size = grid_size
         self.calibrated = False
         self.locked_corners = None
@@ -38,6 +38,8 @@ class Receiver:
         self.flip_horizontal = False  # Toggle for horizontal flip
         self.show_sample_regions = False
         self.sample_polys = None
+        self.brightness_adjust = brightness_adjust  # Brightness adjustment for color sampling
+        self.debug_color_sampling = False  # Print color sampling debug info
 
     def calibrate(self, frame):
         """Detect and lock onto the grid"""
@@ -193,30 +195,48 @@ class Receiver:
         except UnicodeDecodeError:
             return None, message_bytes
 
-    def read_color_pattern(self, frame, grid_size, border_ratio=None):
+    def read_color_pattern(self, frame, grid_size, border_ratio=None, expected_indices=None):
         """Sample palette indices from the locked region."""
         if not self.calibrated or self.locked_corners is None:
             return None
         if border_ratio is None:
             border_ratio = self.border_ratio
+
+        # Determine if we need samples for debugging
+        return_samples = self.debug_color_sampling
+
         pattern_result = read_color_pattern(
             frame,
             self.locked_corners,
             grid_size,
             border_ratio,
-            brightness_adjust=0,
+            brightness_adjust=self.brightness_adjust,
             return_debug=self.show_sample_regions,
+            return_samples=return_samples,
         )
-        if self.show_sample_regions:
+
+        if self.show_sample_regions and return_samples:
+            pattern, debug_img, sample_polys, sample_grid, samples = pattern_result
+            self.debug_color_samples = debug_img
+            self.sample_polys = sample_polys
+            self.debug_sample_grid = sample_grid
+            if self.debug_color_sampling:
+                print_color_sampling_debug(samples, pattern, expected_indices)
+        elif self.show_sample_regions:
             pattern, debug_img, sample_polys, sample_grid = pattern_result
             self.debug_color_samples = debug_img
             self.sample_polys = sample_polys
             self.debug_sample_grid = sample_grid
+        elif return_samples:
+            pattern, samples = pattern_result
+            if self.debug_color_sampling:
+                print_color_sampling_debug(samples, pattern, expected_indices)
         else:
             pattern = pattern_result
             self.debug_color_samples = None
             self.sample_polys = None
             self.debug_sample_grid = None
+
         # Flip horizontally if enabled (for facing cameras)
         if pattern is not None and self.flip_horizontal:
             pattern = np.fliplr(pattern)
@@ -235,13 +255,14 @@ class Receiver:
 
 
 def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05,
-                       brightness_adjust=0, return_debug=False):
+                       brightness_adjust=0, return_debug=False, return_samples=False):
     """Warp locked region and quantize each cell to the nearest palette color.
 
     When return_debug is True, also returns:
       - the warped image with sample rectangles drawn
       - the polygons (in the original camera space) for overlaying
       - a simplified sample-grid visualization
+    When return_samples is True, also returns the raw RGB samples (for debugging)
     """
     if locked_corners is None:
         return None
@@ -261,7 +282,7 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05,
         sample_grid = np.zeros_like(warped)
         sample_grid[:] = 32
         M_inv = np.linalg.inv(M).astype(np.float32)
-    
+
     # Apply brightness adjustment if needed
     if brightness_adjust != 0:
         warped = cv2.convertScaleAbs(warped, alpha=1.0, beta=brightness_adjust)
@@ -305,8 +326,42 @@ def read_color_pattern(frame, locked_corners, grid_size, border_ratio=0.05,
 
     if return_debug:
         sample_polys = [poly.astype(np.int32) for poly in sample_polys]
+        if return_samples:
+            return color_indices, debug_img, sample_polys, sample_grid, samples
         return color_indices, debug_img, sample_polys, sample_grid
+    if return_samples:
+        return color_indices, samples
     return color_indices
+
+
+def print_color_sampling_debug(samples, color_indices, expected_indices=None):
+    """Print debug info about color sampling quality."""
+    from codec_composite_camera import COLORS_8
+
+    print("\n[COLOR DEBUG] Sampled RGB vs Palette Colors:")
+    print("Palette reference:")
+    for idx, color in enumerate(COLORS_8):
+        print(f"  {idx}: RGB{tuple(color)} (B={color[0]}, G={color[1]}, R={color[2]})")
+
+    print("\nFirst few sampled cells:")
+    flat_samples = samples.reshape(-1, 3)
+    flat_indices = color_indices.flatten()
+    if expected_indices is not None:
+        flat_expected = expected_indices.flatten()
+
+    for i in range(min(16, len(flat_samples))):
+        sample_rgb = flat_samples[i]
+        matched_idx = flat_indices[i]
+        palette_rgb = COLORS_8[matched_idx]
+        distance = np.sqrt(np.sum((sample_rgb - palette_rgb) ** 2))
+
+        status = "✓"
+        if expected_indices is not None and matched_idx != flat_expected[i]:
+            status = f"✗ (expected {flat_expected[i]})"
+
+        print(f"  Cell {i}: Sampled RGB({sample_rgb[0]:.1f},{sample_rgb[1]:.1f},{sample_rgb[2]:.1f}) "
+              f"→ matched palette {matched_idx} RGB{tuple(palette_rgb)} "
+              f"(dist={distance:.1f}) {status}")
 
 
 def is_calibration_pattern(color_indices):
@@ -896,10 +951,15 @@ def run_rx(args):
     # Set buffer size to 1 to reduce latency
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    rx = Receiver(grid_size=args.grid_size)
+    rx = Receiver(grid_size=args.grid_size, brightness_adjust=args.brightness_adjust)
     if args.flip_horizontal:
         rx.flip_horizontal = True
         print("[RX] Horizontal flip enabled (for facing cameras)")
+    if args.brightness_adjust != 0:
+        print(f"[RX] Brightness adjust: {args.brightness_adjust}")
+    if args.debug_color_sampling:
+        rx.debug_color_sampling = True
+        print("[RX] Color sampling debug enabled")
     codec_obj = codec(args.rows, args.cols, min_val=0, max_val=15)
     if not hasattr(codec_obj, 'grids_needed'):
         raise TypeError(f"Failed to create codec object: got {type(codec_obj)}")
@@ -959,7 +1019,10 @@ def run_rx(args):
     print("  p   - Start capture (after calibration)")
     print("  r   - Reset captured frames")
     print("  f   - Toggle horizontal flip (IMPORTANT: enable if cameras face each other!)")
+    print("  d   - Toggle sample region overlay (debug visualization)")
+    print("  s   - Toggle color sampling debug (shows RGB values vs palette)")
     print("  +/- - Adjust border offset")
+    print("  b/B - Decrease/Increase brightness (-100 to +100)")
     print("  q   - Quit")
     print("=" * 70)
     print(f"Capture threshold: {capture_threshold*100:.1f}% change, "
@@ -1332,6 +1395,16 @@ def run_rx(args):
                     cv2.destroyWindow('Debug: Sample Grid')
                 except cv2.error:
                     pass
+        elif key == ord('b'):
+            rx.brightness_adjust = max(-100, rx.brightness_adjust - 5)
+            print(f"\n[RX] Brightness: {rx.brightness_adjust}")
+        elif key == ord('B'):
+            rx.brightness_adjust = min(100, rx.brightness_adjust + 5)
+            print(f"\n[RX] Brightness: {rx.brightness_adjust}")
+        elif key == ord('s'):
+            rx.debug_color_sampling = not rx.debug_color_sampling
+            state = "ON" if rx.debug_color_sampling else "OFF"
+            print(f"\n[RX] Color sampling debug: {state}")
 
     cap.release()
     cv2.destroyAllWindows()
@@ -1351,6 +1424,8 @@ def build_arg_parser():
     parser.add_argument('--test-pattern', action='store_true', help='Use test pattern tensor instead of random (TX)')
     parser.add_argument('--color-test-pattern', action='store_true', help='Use simple color test pattern (cycles 0-7) for TX mode')
     parser.add_argument('--camera-index', type=int, default=0, help='Camera index for RX mode')
+    parser.add_argument('--brightness-adjust', type=int, default=0,
+                        help='Brightness adjustment for color sampling, -100 to +100 (RX mode)')
     parser.add_argument('--save-decoded', type=str, help='Path to save decoded tensor (RX mode)')
     parser.add_argument('--capture-threshold', type=float, default=0.05,
                         help='Fraction of cells that must change before counting a new frame (RX)')
@@ -1376,6 +1451,8 @@ def build_arg_parser():
                         help='Start capturing immediately without waiting for TX start signal (RX)')
     parser.add_argument('--debug-frame-compare', action='store_true',
                         help='Compare each captured frame against expected values (requires known tensor)')
+    parser.add_argument('--debug-color-sampling', action='store_true',
+                        help='Print detailed color sampling debug info for each captured frame (RX)')
     return parser
 
 
