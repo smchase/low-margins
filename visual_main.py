@@ -17,6 +17,7 @@ import time
 
 import cv2
 import numpy as np
+import torch
 
 from codec import codec
 from config import (
@@ -562,7 +563,10 @@ class CodecTransmitterDisplay:
                     else:
                         # Start next iteration
                         self.current_grid_idx = 0
-                        print(f"\n[TX] Iteration {self.current_stream_iteration}/{self.stream_count} complete, starting next tensor...")
+                        import time as _time
+                        elapsed = _time.time() - self.transmission_start_time
+                        print(f"\n[TX STREAM] Iteration {self.current_stream_iteration}/{self.stream_count} complete!")
+                        print(f"[TX STREAM] Elapsed so far: {elapsed:.2f}s, starting next tensor...")
 
     def _current_slice_values(self):
         full_grid = self.encoded_grids[self.current_grid_idx]
@@ -820,22 +824,26 @@ def load_tensor(args):
         print(f"[TX] Diagonal: {[tensor[i, i] for i in range(min(10, args.rows, args.cols))]}")
         return tensor
 
-    rng = np.random.default_rng(args.seed)
-    tensor = rng.standard_normal((args.rows, args.cols)).astype(np.float16)
-    print(f"[TX] Generated random tensor with seed={args.seed}")
+    # Use PyTorch for random tensor generation (more realistic for ML use cases)
+    torch.manual_seed(args.seed)
+    tensor_torch = torch.randn(args.rows, args.cols, dtype=torch.float32)
+    tensor = tensor_torch.numpy().astype(np.float16)
+    
+    print(f"[TX] Generated random tensor with PyTorch (seed={args.seed})")
     print(f"[TX] Stats: min={tensor.min():.3f}, max={tensor.max():.3f}, mean={tensor.mean():.3f}, std={tensor.std():.3f}")
     print(f"[TX] First row (5 vals): {tensor[0, :5]}")
     print(f"[TX] Hint: Use --verify-random --seed {args.seed} on RX to verify transmission")
     return tensor
 
 
-def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force_alternating=False, flip_horizontal=False):
+def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force_alternating=False, flip_horizontal=False, verbose=True):
     """
     Decode captured color frames into grids for 5-color system.
     No phases - each frame is a direct grid slice with values 0-4.
     
     Args:
         flip_horizontal: If True, flip each frame horizontally before assembly
+        verbose: If False, reduce logging output (useful for stream mode)
     """
     # Validate codec_obj is actually a codec object
     if not hasattr(codec_obj, 'grids_needed'):
@@ -847,7 +855,8 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force
     if len(color_frames) < expected:
         raise ValueError(f"Need {expected} frames, captured {len(color_frames)}")
 
-    print(f"[RX] Decoding {len(color_frames)} frames into {codec_obj.grids_needed()} grids (5-color system)")
+    if verbose:
+        print(f"[RX] Decoding {len(color_frames)} frames into {codec_obj.grids_needed()} grids (5-color system)")
     
     # Decode frames in order - each frame is one grid slice
     frame_iter = iter(color_frames)
@@ -872,22 +881,24 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force
                     slice_values = frame.astype(np.uint8)
                     col_blocks.append(slice_values)
                     
-                    # Debug: show unique values and corner samples
-                    unique_vals = np.unique(frame)
-                    print(f"[RX DECODE] Frame {frame_counter}: Grid {grid_idx+1}, slice ({row_idx},{col_idx})")
-                    print(f"  Unique values ({len(unique_vals)}): {unique_vals}")
-                    print(f"  Corners: TL={frame[0,0]}, TR={frame[0,-1]}, BL={frame[-1,0]}, BR={frame[-1,-1]}")
-                    print(f"  First row (5 vals): {frame[0,:5]}")
+                    # Debug: show unique values and corner samples (only if verbose)
+                    if verbose:
+                        unique_vals = np.unique(frame)
+                        print(f"[RX DECODE] Frame {frame_counter}: Grid {grid_idx+1}, slice ({row_idx},{col_idx})")
+                        print(f"  Unique values ({len(unique_vals)}): {unique_vals}")
+                        print(f"  Corners: TL={frame[0,0]}, TR={frame[0,-1]}, BL={frame[-1,0]}, BR={frame[-1,-1]}")
+                        print(f"  First row (5 vals): {frame[0,:5]}")
                         
                 row_bands.append(np.hstack(col_blocks))
             full_grid = np.vstack(row_bands)
             final_grid = full_grid[:rows, :cols]
             
-            # Debug: show assembled grid info
-            print(f"[RX DECODE] Grid {grid_idx+1} assembled: shape={final_grid.shape}")
-            print(f"  Final grid (after crop): shape={final_grid.shape}")
-            print(f"  First row (5 vals): {final_grid[0,:5]}")
-            print(f"  Unique values in final: {np.unique(final_grid)}")
+            # Debug: show assembled grid info (only if verbose)
+            if verbose:
+                print(f"[RX DECODE] Grid {grid_idx+1} assembled: shape={final_grid.shape}")
+                print(f"  Final grid (after crop): shape={final_grid.shape}")
+                print(f"  First row (5 vals): {final_grid[0,:5]}")
+                print(f"  Unique values in final: {np.unique(final_grid)}")
             
             grids.append(final_grid)
     except StopIteration as exc:
@@ -895,12 +906,13 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force
 
     stacked_grids = np.stack(grids, axis=0)
     
-    # Debug: show the range of values in the decoded grids
-    print(f"\n[RX DECODE] Final stacked grids shape: {stacked_grids.shape}")
-    for i, grid in enumerate(stacked_grids):
-        unique_vals = np.unique(grid)
-        print(f"[RX DECODE] Grid {i+1} final: unique={unique_vals}, min={grid.min()}, max={grid.max()}")
-        print(f"  First row (5 vals): {grid[0,:5]}")
+    # Debug: show the range of values in the decoded grids (only if verbose)
+    if verbose:
+        print(f"\n[RX DECODE] Final stacked grids shape: {stacked_grids.shape}")
+        for i, grid in enumerate(stacked_grids):
+            unique_vals = np.unique(grid)
+            print(f"[RX DECODE] Grid {i+1} final: unique={unique_vals}, min={grid.min()}, max={grid.max()}")
+            print(f"  First row (5 vals): {grid[0,:5]}")
     
     # Ensure values are within valid range [0, 4]
     if stacked_grids.max() > CODEC_MAX_VAL:
@@ -1056,10 +1068,12 @@ def run_rx(args):
             print(f"[RX] Reference first row: {reference_tensor[0, :min(10, args.cols)]}")
             print(f"[RX] Reference value range: [{reference_tensor.min():.3f}, {reference_tensor.max():.3f}]")
         elif args.verify_random:
-            # Generate the same random tensor as TX using the seed
-            rng = np.random.default_rng(args.seed)
-            reference_tensor = rng.standard_normal((args.rows, args.cols)).astype(np.float16)
-            print(f"[RX] Generated reference random tensor with seed={args.seed}")
+            # Generate the same random tensor as TX using PyTorch with the seed
+            torch.manual_seed(args.seed)
+            tensor_torch = torch.randn(args.rows, args.cols, dtype=torch.float32)
+            reference_tensor = tensor_torch.numpy().astype(np.float16)
+            
+            print(f"[RX] Generated reference random tensor with PyTorch (seed={args.seed})")
             print(f"[RX] Reference shape: {reference_tensor.shape}")
             print(f"[RX] Reference stats: min={reference_tensor.min():.3f}, max={reference_tensor.max():.3f}, mean={reference_tensor.mean():.3f}")
             print(f"[RX] First row (5 vals): {reference_tensor[0, :5]}")
@@ -1263,21 +1277,33 @@ def run_rx(args):
                     
                     # Don't enforce strict phase alternation - just track what we captured
 
-                    if total_captured >= total_frames_needed:
+                    # Check if we have enough frames for one tensor
+                    frames_for_current_tensor = len(captured_frames) - (tensors_received * frames_per_tensor)
+                    
+                    if frames_for_current_tensor >= frames_per_tensor:
                         if stream_start_time is None:
                             stream_start_time = time.time()
                         
-                        print("\n[RX] Frames collected - decoding...")
+                        # Extract frames for this tensor only
+                        start_idx = tensors_received * frames_per_tensor
+                        end_idx = start_idx + frames_per_tensor
+                        current_tensor_frames = captured_frames[start_idx:end_idx]
+                        
+                        print(f"\n[RX] Decoding tensor {tensors_received+1}/{stream_count} (frames {start_idx+1}-{end_idx})...")
                         try:
                             # Debug: verify codec object
                             if not hasattr(codec_obj, 'grids_needed'):
                                 raise TypeError(f"Codec object is not valid: {type(codec_obj)}")
-                            grids = decode_captured_frames(captured_frames, codec_obj, args.rows, args.cols, args.grid_size, 
+                            # Use verbose logging only for first tensor in stream mode
+                            verbose_decode = not stream_mode or tensors_received == 0
+                            grids = decode_captured_frames(current_tensor_frames, codec_obj, args.rows, args.cols, args.grid_size, 
                                                           force_alternating=args.force_alternating,
-                                                          flip_horizontal=rx.flip_horizontal)
-                            if expected_frames is not None:
+                                                          flip_horizontal=rx.flip_horizontal,
+                                                          verbose=verbose_decode)
+                            if expected_frames is not None and not stream_mode:
+                                # Only compare frames in non-stream mode to avoid confusion
                                 print("\n[RX] Comparing captured frames to expected values...")
-                                compare_captured_to_expected(captured_frames, expected_frames)
+                                compare_captured_to_expected(current_tensor_frames, expected_frames)
                             decoded_tensor = codec_obj.decode(grids)
                             
                             # Check for NaN values
@@ -1311,10 +1337,16 @@ def run_rx(args):
                             if args.color_test_pattern:
                                 verify_color_test_pattern(decoded_tensor, args.rows, args.cols)
                             elif args.verify_random:
-                                # Verify against the deterministic random tensor
-                                print("\n[RX VERIFY] Verifying against deterministic random tensor...")
-                                rng = np.random.default_rng(args.seed)
-                                expected = rng.standard_normal((args.rows, args.cols)).astype(np.float16)
+                                # Verify against the deterministic random tensor (same for all iterations in stream)
+                                verbose_verify = not stream_mode or tensors_received == 0
+                                
+                                if verbose_verify:
+                                    print("\n[RX VERIFY] Verifying against deterministic random tensor...")
+                                
+                                # Generate same tensor as TX using PyTorch
+                                torch.manual_seed(args.seed)
+                                tensor_torch = torch.randn(args.rows, args.cols, dtype=torch.float32)
+                                expected = tensor_torch.numpy().astype(np.float16)
                                 
                                 # Bit-exact comparison
                                 expected_u16 = expected.view(np.uint16)
@@ -1323,37 +1355,40 @@ def run_rx(args):
                                 total = expected.size
                                 accuracy = matches / total * 100 if total > 0 else 0
                                 
-                                print(f"[RX VERIFY] Expected (seed={args.seed}): shape={expected.shape}")
-                                print(f"[RX VERIFY] Expected stats: min={expected.min():.3f}, max={expected.max():.3f}, mean={expected.mean():.3f}")
-                                print(f"[RX VERIFY] Decoded stats:  min={decoded_tensor.min():.3f}, max={decoded_tensor.max():.3f}, mean={decoded_tensor.mean():.3f}")
-                                print(f"[RX VERIFY] Expected first row (5 vals): {expected[0, :5]}")
-                                print(f"[RX VERIFY] Decoded first row (5 vals):  {decoded_tensor[0, :5]}")
-                                print(f"[RX VERIFY] Bit-exact matches: {matches}/{total} ({accuracy:.2f}%)")
+                                if verbose_verify:
+                                    print(f"[RX VERIFY] Expected (seed={args.seed}): shape={expected.shape}")
+                                    print(f"[RX VERIFY] Expected stats: min={expected.min():.3f}, max={expected.max():.3f}, mean={expected.mean():.3f}")
+                                    print(f"[RX VERIFY] Decoded stats:  min={decoded_tensor.min():.3f}, max={decoded_tensor.max():.3f}, mean={decoded_tensor.mean():.3f}")
+                                    print(f"[RX VERIFY] Expected first row (5 vals): {expected[0, :5]}")
+                                    print(f"[RX VERIFY] Decoded first row (5 vals):  {decoded_tensor[0, :5]}")
+                                print(f"[RX VERIFY] Tensor {tensors_received+1}: Bit-exact matches: {matches}/{total} ({accuracy:.2f}%)")
                                 
                                 if accuracy == 100.0:
-                                    print("[RX VERIFY] ✅ Perfect match! Random tensor transmitted correctly.")
+                                    print(f"[RX VERIFY] ✅ Tensor {tensors_received+1}: Perfect match!")
                                 elif accuracy > 99.0:
-                                    print(f"[RX VERIFY] ✅ Nearly perfect ({accuracy:.2f}%)")
-                                    # Show a few mismatches
-                                    mismatches = np.where(expected_u16 != decoded_u16)
-                                    if len(mismatches[0]) > 0:
-                                        print(f"[RX VERIFY] Sample mismatches (showing up to 5):")
-                                        for idx in range(min(5, len(mismatches[0]))):
-                                            i, j = mismatches[0][idx], mismatches[1][idx]
-                                            exp_val = expected[i, j]
-                                            dec_val = decoded_tensor[i, j]
-                                            print(f"  [{i},{j}]: decoded={dec_val:.6f}, expected={exp_val:.6f}")
+                                    print(f"[RX VERIFY] ✅ Tensor {tensors_received+1}: Nearly perfect ({accuracy:.2f}%)")
+                                    if verbose_verify:
+                                        # Show a few mismatches
+                                        mismatches = np.where(expected_u16 != decoded_u16)
+                                        if len(mismatches[0]) > 0:
+                                            print(f"[RX VERIFY] Sample mismatches (showing up to 5):")
+                                            for idx in range(min(5, len(mismatches[0]))):
+                                                i, j = mismatches[0][idx], mismatches[1][idx]
+                                                exp_val = expected[i, j]
+                                                dec_val = decoded_tensor[i, j]
+                                                print(f"  [{i},{j}]: decoded={dec_val:.6f}, expected={exp_val:.6f}")
                                 else:
-                                    print(f"[RX VERIFY] ⚠️  Only {accuracy:.2f}% match - transmission errors detected")
-                                    # Show some mismatches
-                                    mismatches = np.where(expected_u16 != decoded_u16)
-                                    if len(mismatches[0]) > 0:
-                                        print(f"[RX VERIFY] Sample mismatches (showing up to 10):")
-                                        for idx in range(min(10, len(mismatches[0]))):
-                                            i, j = mismatches[0][idx], mismatches[1][idx]
-                                            exp_val = expected[i, j]
-                                            dec_val = decoded_tensor[i, j]
-                                            print(f"  [{i},{j}]: decoded={dec_val:.3f}, expected={exp_val:.3f}")
+                                    print(f"[RX VERIFY] ⚠️  Tensor {tensors_received+1}: Only {accuracy:.2f}% match - transmission errors!")
+                                    if verbose_verify:
+                                        # Show some mismatches
+                                        mismatches = np.where(expected_u16 != decoded_u16)
+                                        if len(mismatches[0]) > 0:
+                                            print(f"[RX VERIFY] Sample mismatches (showing up to 10):")
+                                            for idx in range(min(10, len(mismatches[0]))):
+                                                i, j = mismatches[0][idx], mismatches[1][idx]
+                                                exp_val = expected[i, j]
+                                                dec_val = decoded_tensor[i, j]
+                                                print(f"  [{i},{j}]: decoded={dec_val:.3f}, expected={exp_val:.3f}")
                             elif args.verify_test_pattern:
                                 print("\n[RX] Verifying test pattern values...")
                                 expected = create_test_pattern_tensor(args.rows, args.cols)
@@ -1416,9 +1451,8 @@ def run_rx(args):
                                     print(f"[RX STREAM] Final throughput: {throughput_kbps:.2f} KB/s ({throughput_kbps*8:.2f} Kbps)")
                                     capture_active = False
                                 else:
-                                    # Continue capturing next tensor
+                                    # Continue capturing next tensor (keep frames in buffer)
                                     print(f"[RX STREAM] Waiting for tensor {tensors_received+1}/{stream_count}...")
-                                    captured_frames.clear()
                                     last_pattern = None
                                     pending_pattern = None
                                     pending_phase = None
