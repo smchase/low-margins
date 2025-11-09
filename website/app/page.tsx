@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import * as ort from "onnxruntime-web";
-import { fetchMNISTImages, fetchMNISTLabels } from "@/lib/mnist";
+import { fetchMNISTImages, fetchMNISTLabels } from "@/utils/mnist";
 
 const hasWebGPU = typeof navigator !== "undefined" && "gpu" in navigator;
 
