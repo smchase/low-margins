@@ -45,7 +45,6 @@ class Node:
             self.state = WorkerState.INIT
             transform = transforms.Compose([
                 transforms.ToTensor(),
-                transforms.Normalize((0.1307,), (0.3081,))
             ])
             
             train_dataset = datasets.MNIST(
@@ -226,7 +225,6 @@ def worker_process(worker_id, is_root, data_indices, grad_queue, param_queue, re
         print(f"Root: Running evaluation...")
         transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))
         ])
         
         test_dataset = datasets.MNIST(
@@ -274,7 +272,6 @@ def run_distributed_training(num_workers=3, learning_rate=0.01):
     
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
     ])
     
     train_dataset = datasets.MNIST(

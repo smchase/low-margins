@@ -27,6 +27,7 @@ class MLP(nn.Module):
         return x
 
 def create_model(device='cpu'):
+    torch.manual_seed(42)
     model = MLP().bfloat16()
     model.to(device)
     return model
