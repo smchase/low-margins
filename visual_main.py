@@ -671,6 +671,21 @@ def verify_color_test_pattern(decoded_tensor, rows, cols):
     print(f"[RX VERIFY] Decoded first row:  {decoded_tensor[0, :min(10, cols)]}")
     print(f"[RX VERIFY] Expected last row:  {expected[-1, :min(10, cols)]}")
     print(f"[RX VERIFY] Decoded last row:   {decoded_tensor[-1, :min(10, cols)]}")
+    
+    # Check if it's just horizontally flipped
+    decoded_flipped_h = np.fliplr(decoded_tensor)
+    matches_flipped_h = np.sum(expected.view(np.uint16) == decoded_flipped_h.view(np.uint16))
+    print(f"[RX VERIFY] Matches if horizontally flipped: {matches_flipped_h}/{expected.size} ({matches_flipped_h/expected.size*100:.1f}%)")
+    
+    # Check if it's vertically flipped
+    decoded_flipped_v = np.flipud(decoded_tensor)
+    matches_flipped_v = np.sum(expected.view(np.uint16) == decoded_flipped_v.view(np.uint16))
+    print(f"[RX VERIFY] Matches if vertically flipped: {matches_flipped_v}/{expected.size} ({matches_flipped_v/expected.size*100:.1f}%)")
+    
+    # Check if it's rotated 180
+    decoded_rot180 = np.rot90(decoded_tensor, 2)
+    matches_rot180 = np.sum(expected.view(np.uint16) == decoded_rot180.view(np.uint16))
+    print(f"[RX VERIFY] Matches if rotated 180°: {matches_rot180}/{expected.size} ({matches_rot180/expected.size*100:.1f}%)")
 
     # Do bit-exact comparison by viewing as uint16
     expected_u16 = expected.view(np.uint16)
@@ -773,10 +788,13 @@ def load_tensor(args):
     return tensor
 
 
-def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force_alternating=False):
+def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force_alternating=False, flip_horizontal=False):
     """
     Decode captured color frames into grids for 5-color system.
     No phases - each frame is a direct grid slice with values 0-4.
+    
+    Args:
+        flip_horizontal: If True, flip each frame horizontally before assembly
     """
     # Validate codec_obj is actually a codec object
     if not hasattr(codec_obj, 'grids_needed'):
@@ -803,6 +821,13 @@ def decode_captured_frames(color_frames, codec_obj, rows, cols, grid_size, force
                     # Get next frame - direct mapping, no phases
                     frame = next(frame_iter)
                     frame_counter += 1
+                    
+                    # Unflip the frame if it was captured with horizontal flip enabled
+                    # The Receiver already flipped it during capture, so we need to flip it back
+                    # before assembling grids for the codec
+                    if flip_horizontal:
+                        frame = np.fliplr(frame)
+                    
                     slice_values = frame.astype(np.uint8)
                     col_blocks.append(slice_values)
                     
@@ -1182,7 +1207,8 @@ def run_rx(args):
                             if not hasattr(codec_obj, 'grids_needed'):
                                 raise TypeError(f"Codec object is not valid: {type(codec_obj)}")
                             grids = decode_captured_frames(captured_frames, codec_obj, args.rows, args.cols, args.grid_size, 
-                                                          force_alternating=args.force_alternating)
+                                                          force_alternating=args.force_alternating,
+                                                          flip_horizontal=rx.flip_horizontal)
                             if expected_frames is not None:
                                 print("\n[RX] Comparing captured frames to expected values...")
                                 compare_captured_to_expected(captured_frames, expected_frames)
